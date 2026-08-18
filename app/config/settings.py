@@ -54,6 +54,14 @@ class Settings(BaseSettings):
     def normalize_trading_mode(cls, value: str) -> str:
         return str(value or "PAPER").upper()
 
+    @field_validator("redis_url", mode="before")
+    @classmethod
+    def normalize_redis_url(cls, value: str) -> str:
+        normalized = str(value or "").strip().strip("'\"")
+        if normalized.startswith("redis-cli -u "):
+            normalized = normalized[len("redis-cli -u "):].strip().strip("'\"")
+        return normalized
+
     @property
     def supabase_server_key(self) -> str:
         return (self.supabase_service_role_key or self.supabase_key).strip()

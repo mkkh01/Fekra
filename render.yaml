@@ -34,7 +34,7 @@ services:
       - key: GEMINI_API_KEY_5
         sync: false
       - key: GEMINI_MODEL
-        value: gemini-3.7-flash
+        value: gemini-2.5-flash
       - key: CORS_ORIGINS
         sync: false
       - key: JWT_SECRET

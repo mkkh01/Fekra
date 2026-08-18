@@ -91,7 +91,7 @@ async def health(request: Request) -> dict:
     return request.app.state.runtime.health()
 
 
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def index() -> FileResponse:
     return FileResponse("app/static/index.html")
 
