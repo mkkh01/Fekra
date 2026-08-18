@@ -346,16 +346,38 @@ class BrainOrchestrator:
         }
 
     @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any] | None:
+        cleaned = (text or "").strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].lstrip()
+        decoder = json.JSONDecoder()
+        try:
+            parsed, _ = decoder.raw_decode(cleaned)
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            pass
+        for index, char in enumerate(cleaned):
+            if char != "{":
+                continue
+            try:
+                parsed, _ = decoder.raw_decode(cleaned[index:])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                continue
+        return None
+
+    @staticmethod
     def _parse_decision(result: dict[str, Any]) -> dict[str, Any]:
         if not result.get("ok"):
             return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "trade_setup": BrainOrchestrator._normalize_trade_setup({}), "scoring": BrainOrchestrator._normalize_scoring({})}
         text = (result.get("text") or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-            if text.startswith("json"):
-                text = text[4:]
+        parsed = BrainOrchestrator._extract_json_object(text)
         try:
-            parsed = json.loads(text)
+            if parsed is None:
+                raise json.JSONDecodeError("No JSON object found", text, 0)
             action = parsed.get("action", "WAIT")
             if action not in {"BUY", "SELL_REDUCE", "WAIT", "NO_TRADE", "MONITOR", "CLOSE"}:
                 parsed["action"] = "WAIT"
@@ -371,7 +393,7 @@ class BrainOrchestrator:
         except json.JSONDecodeError:
             return {
                 "action": "WAIT",
-                "summary": "Gemini returned a non-structured response; defaulting to WAIT.",
+                "summary": "Gemini returned a non-structured response; defaulting to WAIT. A structured JSON response is required for evidence and scoring.",
                 "evidence": [],
                 "counter_evidence": [],
                 "alternative_hypotheses": [],

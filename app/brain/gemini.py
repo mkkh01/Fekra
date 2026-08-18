@@ -85,10 +85,13 @@ class GeminiKeyPool:
     async def _request(self, key: str, prompt: str, system_instruction: str) -> str:
         def call() -> str:
             client = genai.Client(api_key=key)
+            config = {"response_mime_type": "application/json"}
+            if system_instruction:
+                config["system_instruction"] = system_instruction
             response = client.models.generate_content(
                 model=self.model,
                 contents=prompt,
-                config={"system_instruction": system_instruction} if system_instruction else None,
+                config=config,
             )
             return (response.text or "").strip()
 
