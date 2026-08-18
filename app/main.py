@@ -27,11 +27,11 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     state = RuntimeState()
-    state.supabase_configured = bool(settings.supabase_url and settings.supabase_key)
+    state.supabase_configured = bool(settings.supabase_url and settings.supabase_server_key)
     state.gemini_configured = bool(settings.gemini_keys)
 
     storage = StorageManager()
-    state.supabase_configured = bool(settings.supabase_url and settings.supabase_key)
+    state.supabase_configured = bool(settings.supabase_url and settings.supabase_server_key)
     state.redis_connected = bool(settings.redis_url)
 
     async def check_storage() -> None:

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
 
     supabase_url: str = ""
     supabase_key: str = ""
+    supabase_service_role_key: str = ""
     redis_url: str = ""
 
     gemini_api_key: str = ""
@@ -52,6 +53,10 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_trading_mode(cls, value: str) -> str:
         return str(value or "PAPER").upper()
+
+    @property
+    def supabase_server_key(self) -> str:
+        return (self.supabase_service_role_key or self.supabase_key).strip()
 
     @property
     def cors_origin_list(self) -> list[str]:

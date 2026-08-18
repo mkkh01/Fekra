@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -17,15 +19,22 @@ class StorageManager:
         self.redis = None
         self.supabase_ok = False
         self.redis_ok = False
+        self.supabase_write_enabled = False
+        self._supabase_auth_error_logged = False
         self._init_supabase()
         self._init_redis()
 
     def _init_supabase(self) -> None:
-        if not (self.settings.supabase_url and self.settings.supabase_key):
+        key = self.settings.supabase_server_key
+        if not (self.settings.supabase_url and key):
+            return
+        if not self._looks_like_server_key(key):
+            logger.warning("Supabase writes disabled: SUPABASE_SERVICE_ROLE_KEY or a service_role SUPABASE_KEY is required")
             return
         try:
             from supabase import create_client
-            self.supabase = create_client(self.settings.supabase_url, self.settings.supabase_key)
+            self.supabase = create_client(self.settings.supabase_url, key)
+            self.supabase_write_enabled = True
         except Exception as exc:
             logger.warning("Supabase client initialization failed: %s", exc)
 
@@ -42,7 +51,7 @@ class StorageManager:
         if self.supabase is not None:
             try:
                 await asyncio.to_thread(lambda: self.supabase.table("assets").select("symbol").limit(1).execute())
-                self.supabase_ok = True
+                self.supabase_ok = self.supabase_write_enabled
             except Exception as exc:
                 self.supabase_ok = False
                 logger.warning("Supabase health check failed: %s", exc)
@@ -58,16 +67,16 @@ class StorageManager:
             await self.redis.aclose()
 
     async def write_event(self, event_type: str, message: str, data: dict[str, Any] | None = None) -> None:
-        if self.supabase is None:
+        if self.supabase is None or not self.supabase_write_enabled:
             return
         payload = {"event_type": event_type, "message": message, "data": data or {}}
         try:
             await asyncio.to_thread(lambda: self.supabase.table("system_events").insert(payload).execute())
         except Exception as exc:
-            logger.warning("Supabase event write failed: %s", exc)
+            self._mark_supabase_failure(exc, "event write")
 
     async def write_cycle(self, cycle: dict[str, Any]) -> None:
-        if self.supabase is None:
+        if self.supabase is None or not self.supabase_write_enabled:
             return
         payload = {
             "id": cycle["id"],
@@ -99,10 +108,10 @@ class StorageManager:
             }
             await asyncio.to_thread(lambda: self.supabase.table("brain_decisions").insert(decision_payload).execute())
         except Exception as exc:
-            logger.warning("Supabase cycle write failed: %s", exc)
+            self._mark_supabase_failure(exc, "cycle write")
 
     async def write_news(self, item: dict[str, Any]) -> None:
-        if self.supabase is None:
+        if self.supabase is None or not self.supabase_write_enabled:
             return
         payload = {
             "fingerprint": item["id"],
@@ -118,7 +127,31 @@ class StorageManager:
         try:
             await asyncio.to_thread(lambda: self.supabase.table("news").upsert(payload, on_conflict="fingerprint").execute())
         except Exception as exc:
-            logger.warning("Supabase news write failed: %s", exc)
+            self._mark_supabase_failure(exc, "news write")
+
+    @staticmethod
+    def _looks_like_server_key(key: str) -> bool:
+        if key.startswith("sb_secret_"):
+            return True
+        if not key.startswith("eyJ"):
+            return False
+        try:
+            payload = key.split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+            return claims.get("role") == "service_role"
+        except (IndexError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+            return False
+
+    def _mark_supabase_failure(self, exc: Exception, operation: str) -> None:
+        message = str(exc)
+        if "401" in message or "Invalid API key" in message or "Unauthorized" in message:
+            self.supabase_write_enabled = False
+            if not self._supabase_auth_error_logged:
+                logger.error("Supabase authentication failed during %s; disabling further Supabase writes until restart", operation)
+                self._supabase_auth_error_logged = True
+        else:
+            logger.warning("Supabase %s failed: %s", operation, exc)
 
     async def cache_snapshot(self, key: str, value: dict[str, Any], ttl: int = 60) -> None:
         if self.redis is None:

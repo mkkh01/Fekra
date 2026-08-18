@@ -29,7 +29,8 @@ Health Check Path: /health
 | المتغير | مطلوب الآن | الملاحظات |
 |---|---:|---|
 | `SUPABASE_URL` | نعم | رابط مشروع Fekramee5 |
-| `SUPABASE_KEY` | نعم | مفتاح server-side؛ لا ترسله إلى الواجهة |
+| `SUPABASE_KEY` | نعم إذا لم تستخدم المتغير المخصص | مفتاح server-side؛ لا ترسله إلى الواجهة |
+| `SUPABASE_SERVICE_ROLE_KEY` | مفضل | مفتاح service-role/secret للكتابة مع RLS؛ يفضّل استخدامه بدل `SUPABASE_KEY` |
 | `REDIS_URL` | نعم | الحالة الساخنة وحافلة الأحداث |
 | `GEMINI_API_KEY_1` | نعم للتحليل | الحساب الأول |
 | `GEMINI_API_KEY_2` إلى `GEMINI_API_KEY_5` | اختياري | الحسابات الاحتياطية؛ يدور النظام إليها عند فشل الحساب السابق |
@@ -38,7 +39,7 @@ Health Check Path: /health
 | `CORS_ORIGINS` | مستحسن | نطاق Render أو `http://localhost:10000` محليًا |
 | `JWT_SECRET` | مستحسن | يجهز للمصادقة المستقبلية |
 
-لا ترسل قيم الأسرار في Git أو داخل المحادثة. أضفها مباشرة من Render Dashboard.
+لا ترسل قيم الأسرار في Git أو داخل المحادثة. أضفها مباشرة من Render Dashboard. إذا ظهر خطأ Supabase `401 Invalid API key`، تحقق من أن `SUPABASE_URL` يطابق المشروع وأن `SUPABASE_SERVICE_ROLE_KEY` هو مفتاح service-role/secret الصحيح، ثم أعد النشر. التطبيق يوقف محاولات الكتابة بعد أول 401 حتى لا يكرر السجل نفس الخطأ عشرات المرات.
 
 يمكن استخدام `GEMINI_API_KEY` بدل `GEMINI_API_KEY_1` عند وجود حساب واحد فقط. إذا وُجدت المتغيرات المرقمة، يستخدم النظام أول خمسة منها ويرفض كشف قيمها؛ Dashboard يعرض رقم الحساب وحالة الجاهزية والنجاح والفشل فقط.
 
