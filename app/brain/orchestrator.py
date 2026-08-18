@@ -415,6 +415,18 @@ class BrainOrchestrator:
         return cleaned
 
     @staticmethod
+    def _text_list(value: Any) -> list[str]:
+        values = value if isinstance(value, list) else [value] if value not in (None, "") else []
+        result: list[str] = []
+        for item in values:
+            if isinstance(item, dict):
+                item = item.get("summary") or item.get("reason") or item.get("description") or item.get("condition") or item
+            text = BrainOrchestrator._text_value(item).strip()
+            if text and text.lower() not in {"null", "undefined", "object", "[object object]", "غير محدد"}:
+                result.append(text)
+        return result
+
+    @staticmethod
     def _validate_decision(decision: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         errors: list[str] = []
         placeholder_pattern = re.compile(r"(?:^|\s)(?:null|undefined|object|\[object object\]|دليل بلا ملخص منظم|غير محدد)(?:$|\s)", re.IGNORECASE)
@@ -447,7 +459,7 @@ class BrainOrchestrator:
         rr = float(setup.get("reward_risk_ratio") or 0)
         model_trigger = decision.get("trigger_status") if isinstance(decision.get("trigger_status"), dict) else {}
         trigger_confirmed = bool(market.get("trigger_status", {}).get("confirmed")) and bool(model_trigger.get("confirmed", True))
-        rejection: list[str] = [str(item) if not isinstance(item, dict) else json.dumps(item, ensure_ascii=False) for item in (decision.get("rejection_reasons") or [])]
+        rejection: list[str] = BrainOrchestrator._text_list(decision.get("rejection_reasons"))
         contradiction_text = " ".join(json.dumps(item, ensure_ascii=False) if isinstance(item, dict) else str(item) for item in (decision.get("counter_evidence") or [])).lower()
         strong_contradiction_terms = ("resistance", "weak volume", "divergence", "liquidity trap", "failed breakout", "macro", "overextension", "رفض", "كسر", "سحب سيولة")
         strong_contradiction = any(term in contradiction_text for term in strong_contradiction_terms)
@@ -538,7 +550,7 @@ class BrainOrchestrator:
         decision["rejection_reasons"] = rejection
         decision["uncertainty_score"] = uncertainty_score
         decision["uncertainty"] = uncertainty_level
-        decision["uncertainty_reasons"] = rejection[:4] or ["لا يوجد تعارض قوي، لكن التأكد المستقبلي مطلوب"]
+        decision["uncertainty_reasons"] = BrainOrchestrator._text_list(rejection[:4]) or ["لا يوجد تعارض قوي؛ درجة عدم اليقين محسوبة من العوامل والقيود الحالية"]
         decision["consensus"] = "Single AI Analysis"
         decision["consensus_detail"] = {"votes": {"LONG": 1 if trade_decision == "LONG_READY" else 0, "WAIT": 1 if trade_decision == "WAIT" else 0, "SHORT": 1 if trade_decision == "SHORT_READY" else 0}, "winner": "LONG" if trade_decision == "LONG_READY" else "SHORT" if trade_decision == "SHORT_READY" else "WAIT", "percentage": 100.0, "analysis_count": 1}
         decision["final_review"] = {
@@ -549,7 +561,7 @@ class BrainOrchestrator:
             "risk_worth_taking": trade_decision != "WAIT" and rr >= 2.0,
             "result": "WAIT" if trade_decision == "WAIT" else "ACCEPTED_FOR_PAPER_RESEARCH",
         }
-        decision["decision_history"] = {"previous": previous_decision or "NONE", "current": current_decision, "what_changed": rejection if current_decision == "WAIT" else ["تم اجتياز شروط المصادقة الحتمية"]}
+        decision["decision_history"] = {"previous": previous_decision or "NONE", "current": current_decision, "what_changed": BrainOrchestrator._text_list(rejection) if current_decision == "WAIT" else ["تم اجتياز شروط المصادقة الحتمية"]}
         if trade_decision == "WAIT":
             decision["summary"] = f"WAIT: {rejection[0]}" if rejection else decision.get("summary", "WAIT")
         return decision
@@ -581,7 +593,7 @@ class BrainOrchestrator:
         structured_summary = ""
         if item.get("price") is not None or item.get("condition"):
             structured_summary = f"السعر: {item.get('price', '—')} · الشرط: {item.get('condition', '—')}"
-        summary = item.get("summary") or item.get("statement") or item.get("thesis") or item.get("hypothesis") or item.get("description") or item.get("label") or data.get("summary") or data.get("statement") or data.get("hypothesis") or data.get("description") or structured_summary or ""
+        summary = item.get("summary") or item.get("statement") or item.get("thesis") or item.get("hypothesis") or item.get("description") or item.get("label") or item.get("evidence") or item.get("reason") or data.get("summary") or data.get("statement") or data.get("hypothesis") or data.get("description") or data.get("evidence") or structured_summary or ""
         interpretation = item.get("interpretation") or item.get("reason") or item.get("explanation") or data.get("interpretation") or item.get("condition") or ""
         source = item.get("source") or item.get("url") or data.get("source") or data.get("url") or ""
         timestamp = item.get("timestamp") or item.get("published_at") or item.get("retrieved_at") or data.get("timestamp") or data.get("published_at") or ""
@@ -772,6 +784,10 @@ class BrainOrchestrator:
         try:
             if parsed is None:
                 raise json.JSONDecodeError("No JSON object found", text, 0)
+            if not parsed.get("evidence"):
+                parsed["evidence"] = parsed.get("bullish_arguments") or []
+            if not parsed.get("counter_evidence"):
+                parsed["counter_evidence"] = parsed.get("bearish_arguments") or []
             requested_action = str(parsed.get("trade_decision") or parsed.get("action", "WAIT")).upper()
             action_map = {"LONG_READY": "BUY", "SHORT_READY": "SELL_REDUCE", "LONG": "BUY", "SHORT": "SELL_REDUCE", "BUY": "BUY", "SELL_REDUCE": "SELL_REDUCE", "WAIT": "WAIT"}
             if requested_action not in action_map:
@@ -784,6 +800,8 @@ class BrainOrchestrator:
                 parsed["public_action"] = "LONG" if parsed["trade_decision"] == "LONG_READY" else "SHORT" if parsed["trade_decision"] == "SHORT_READY" else "WAIT"
             for key in ("evidence", "counter_evidence", "alternative_hypotheses", "invalidating_context"):
                 parsed[key] = [BrainOrchestrator._normalize_evidence_item(item, key) for item in BrainOrchestrator._as_list(parsed.get(key))]
+            parsed["bullish_arguments"] = parsed["evidence"]
+            parsed["bearish_arguments"] = parsed["counter_evidence"]
             parsed["trade_setup"] = BrainOrchestrator._normalize_trade_setup(parsed)
             parsed["scoring"] = BrainOrchestrator._normalize_scoring(parsed)
             if parsed.get("action") in {"BUY", "SELL_REDUCE"} and not parsed["trade_setup"]["available"]:

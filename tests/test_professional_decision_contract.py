@@ -88,3 +88,19 @@ def test_finalized_score_matches_confidence_and_news_is_zero_without_news() -> N
     assert decision["scoring"]["news_contribution_pct"] == 0
     assert round(sum(decision["scoring"]["contribution_pct"].values()), 2) == 100
     assert decision["consensus"] == "Single AI Analysis"
+
+
+def test_gemini_argument_objects_become_meaningful_canonical_evidence() -> None:
+    decision = BrainOrchestrator._parse_decision({
+        "ok": True,
+        "text": '{"trade_decision":"WAIT","market_bias":"LONG","bullish_arguments":[{"evidence":"Daily trend remains constructive","source":"Binance candles"}],"bearish_arguments":[{"evidence":"Resistance rejected price","source":"Binance candles"}],"invalidation":{"price":95,"condition":"Close below support"},"factor_scores":{"market_structure":60,"trend":60,"momentum":50,"liquidity":50,"volume":50,"volatility":50,"support_resistance":50,"news":0,"data_quality":95,"risk_reward":0}}',
+    })
+    assert decision["evidence"][0]["summary"] == "Daily trend remains constructive"
+    assert decision["counter_evidence"][0]["summary"] == "Resistance rejected price"
+    assert decision["bullish_arguments"] == decision["evidence"]
+    assert decision["bearish_arguments"] == decision["counter_evidence"]
+
+
+def test_text_list_never_splits_a_string_into_characters() -> None:
+    assert BrainOrchestrator._text_list("Price is currently under resistance") == ["Price is currently under resistance"]
+    assert BrainOrchestrator._text_list(["First reason", "Second reason"]) == ["First reason", "Second reason"]
