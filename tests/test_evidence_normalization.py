@@ -19,6 +19,7 @@ def test_normalize_evidence_removes_internal_fields() -> None:
         "interpretation": "Modest positive movement",
         "source": "https://example.com/source",
         "source_name": "",
+        "source_url": "https://example.com/source",
         "timestamp": "2026-08-18T12:00:00Z",
         "age_hours": None,
     }

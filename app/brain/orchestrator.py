@@ -171,6 +171,14 @@ class BrainOrchestrator:
         for group in ("evidence", "counter_evidence"):
             enriched = []
             for evidence in decision.get(group, []):
+                evidence_type = str(evidence.get("type") or "").lower()
+                is_news = "news" in evidence_type or "خبر" in evidence_type or "sentiment" in evidence_type
+                if not is_news:
+                    evidence["source"] = "Binance historical candles"
+                    evidence["source_name"] = "Binance"
+                    evidence["source_url"] = ""
+                    enriched.append(evidence)
+                    continue
                 haystack = " ".join(str(evidence.get(key) or "") for key in ("summary", "interpretation")).lower()
                 words = set(re.findall(r"[a-z0-9]{3,}", haystack))
                 best_item = None
@@ -182,6 +190,7 @@ class BrainOrchestrator:
                 if best_item is not None and best_score >= 2:
                     evidence["source"] = best_item.get("url") or evidence.get("source", "")
                     evidence["source_name"] = best_item.get("source") or evidence.get("source_name", "")
+                    evidence["source_url"] = best_item.get("url") or ""
                     evidence["timestamp"] = best_item.get("published_at") or best_item.get("retrieved_at") or evidence.get("timestamp", "")
                     evidence["age_hours"] = BrainOrchestrator._news_for_prompt(best_item).get("age_hours")
                 enriched.append(evidence)
@@ -245,6 +254,7 @@ class BrainOrchestrator:
             "interpretation": str(interpretation),
             "source": str(source),
             "source_name": str(item.get("source_name") or data.get("source_name") or ""),
+            "source_url": str(item.get("source_url") or data.get("source_url") or source if str(source).startswith("http") else ""),
             "timestamp": str(timestamp),
             "age_hours": item.get("age_hours") or data.get("age_hours"),
         }

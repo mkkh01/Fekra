@@ -27,3 +27,54 @@ def test_attach_news_metadata_adds_article_url_and_age() -> None:
     assert enriched["evidence"][0]["source"] == "https://example.com/article"
     assert enriched["evidence"][0]["source_name"] == "Example News"
     assert enriched["alternative_hypotheses"] == []
+
+
+def test_technical_evidence_keeps_binance_source() -> None:
+    decision = {
+        "evidence": [{"type": "Market Structure/Momentum", "summary": "Higher highs on 1h", "source": "https://cointelegraph.com/rss"}],
+        "counter_evidence": [{"type": "Volume Analysis", "summary": "Volume confirms the move", "source": "https://cointelegraph.com/rss"}],
+        "alternative_hypotheses": [],
+    }
+    enriched = BrainOrchestrator._attach_news_metadata(decision, [{
+        "title": "Unrelated headline",
+        "summary": "News context",
+        "url": "https://example.com/article",
+        "source": "Example News",
+        "published_at": "2026-08-18T12:00:00+00:00",
+    }])
+    assert enriched["evidence"][0]["source"] == "Binance historical candles"
+    assert enriched["evidence"][0]["source_name"] == "Binance"
+    assert enriched["evidence"][0]["source_url"] == ""
+    assert enriched["counter_evidence"][0]["source"] == "Binance historical candles"
+
+
+def test_news_prompt_keeps_article_url_separate_from_feed_source() -> None:
+    item = {
+        "title": "Bitcoin article",
+        "url": "https://example.com/article",
+        "source": "https://example.com/rss",
+        "published_at": "2026-08-18T12:00:00+00:00",
+    }
+    prompt_item = BrainOrchestrator._news_for_prompt(item)
+    assert prompt_item["url"] == "https://example.com/article"
+    assert prompt_item["source"] == "https://example.com/rss"
+    assert prompt_item["url"] != prompt_item["source"]
+
+
+def test_news_metadata_exposes_article_url() -> None:
+    decision = {
+        "evidence": [{"type": "News Sentiment", "summary": "ETF inflows rose strongly", "interpretation": "Bullish"}],
+        "counter_evidence": [],
+        "alternative_hypotheses": [],
+    }
+    news = [{
+        "title": "Bitcoin ETF inflows rose strongly",
+        "summary": "Institutional demand increased",
+        "url": "https://example.com/article",
+        "source": "https://example.com/rss",
+        "published_at": "2026-08-18T12:00:00+00:00",
+    }]
+    enriched = BrainOrchestrator._attach_news_metadata(decision, news)
+    assert enriched["evidence"][0]["source"] == "https://example.com/article"
+    assert enriched["evidence"][0]["source_url"] == "https://example.com/article"
+    assert enriched["evidence"][0]["source_name"] == "https://example.com/rss"
