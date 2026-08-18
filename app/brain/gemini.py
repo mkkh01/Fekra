@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -24,6 +25,11 @@ class GeminiKeyState:
     failures: int = 0
     cooldown_until: datetime | None = None
     last_error: str | None = None
+    last_error_category: str | None = None
+    diagnostic_requests: int = 0
+    diagnostic_successes: int = 0
+    diagnostic_failures: int = 0
+    diagnostic_checked_at: str | None = None
 
     @property
     def ready(self) -> bool:
@@ -64,6 +70,7 @@ class GeminiKeyPool:
                     text = await self._request(key_state.key, prompt, system_instruction)
                     key_state.successes += 1
                     key_state.last_error = None
+                    key_state.last_error_category = None
                     self._sync_metrics()
                     return {
                         "ok": True,
@@ -74,13 +81,51 @@ class GeminiKeyPool:
                 except Exception as exc:
                     key_state.failures += 1
                     key_state.last_error = str(exc)[:300]
-                    key_state.cooldown_until = datetime.now(UTC) + timedelta(seconds=min(60 * (key_state.failures), 900))
+                    key_state.last_error_category = self._classify_error(exc)
+                    cooldown_seconds = 900 if key_state.last_error_category == "MODEL_UNAVAILABLE" else min(60 * key_state.failures, 900)
+                    key_state.cooldown_until = datetime.now(UTC) + timedelta(seconds=cooldown_seconds)
                     self.state.gemini_usage["rotations_total"] += 1
                     self._sync_metrics()
                     self.state.event("GEMINI", "Gemini account failed; rotating to next account", {"account_index": key_state.index})
                     if position == len(ordered) - 1:
                         return {"ok": False, "error": "All configured Gemini accounts failed"}
         return {"ok": False, "error": "Gemini request failed"}
+
+    async def probe_all(self) -> dict[str, Any]:
+        """Probe every configured key once with a minimal JSON request, without changing trading decisions."""
+        if not self.keys:
+            return {"model": self.model, "checked": 0, "results": []}
+        results: list[dict[str, Any]] = []
+        async with self._lock:
+            for key_state in self.keys:
+                key_state.diagnostic_requests += 1
+                key_state.diagnostic_checked_at = datetime.now(UTC).isoformat()
+                try:
+                    text = await self._request(key_state.key, '{"probe":"return ok"}', 'Return JSON only: {"probe":"ok"}.')
+                    key_state.diagnostic_successes += 1
+                    key_state.last_error = None
+                    key_state.last_error_category = None
+                    results.append({"account_index": key_state.index, "status": "OK", "model": self.model, "response_valid": bool(text)})
+                except Exception as exc:
+                    key_state.diagnostic_failures += 1
+                    key_state.last_error = str(exc)[:300]
+                    key_state.last_error_category = self._classify_error(exc)
+                    results.append({"account_index": key_state.index, "status": "FAILED", "model": self.model, "error_category": key_state.last_error_category, "last_error": key_state.last_error})
+            self._sync_metrics()
+        return {"model": self.model, "checked": len(results), "successful": sum(item["status"] == "OK" for item in results), "failed": sum(item["status"] == "FAILED" for item in results), "results": results}
+
+    @staticmethod
+    def _classify_error(exc: Exception) -> str:
+        text = str(exc).upper()
+        if "404" in text or "NOT_FOUND" in text or "MODEL" in text and "AVAILABLE" in text:
+            return "MODEL_UNAVAILABLE"
+        if "429" in text or "RESOURCE_EXHAUSTED" in text or "QUOTA" in text or "RATE" in text and "LIMIT" in text:
+            return "QUOTA_OR_RATE_LIMIT"
+        if "401" in text or "403" in text or "UNAUTHENTICATED" in text or "PERMISSION" in text:
+            return "KEY_OR_PERMISSION"
+        if "TIMEOUT" in text or "CONNECTION" in text or "503" in text or "UNAVAILABLE" in text:
+            return "TEMPORARY_SERVICE_ERROR"
+        return "OTHER_ERROR"
 
     async def _request(self, key: str, prompt: str, system_instruction: str) -> str:
         def call() -> str:
@@ -120,6 +165,11 @@ class GeminiKeyPool:
                     "failures": item.failures,
                     "ready": item.ready,
                     "last_error": item.last_error,
+                    "last_error_category": item.last_error_category,
+                    "diagnostic_requests": item.diagnostic_requests,
+                    "diagnostic_successes": item.diagnostic_successes,
+                    "diagnostic_failures": item.diagnostic_failures,
+                    "diagnostic_checked_at": item.diagnostic_checked_at,
                 }
                 for item in self.keys
             ],

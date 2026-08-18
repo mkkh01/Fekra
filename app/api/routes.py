@@ -34,6 +34,12 @@ async def gemini_usage(request: Request) -> dict:
     return request.app.state.runtime.gemini_usage
 
 
+@router.post("/system/gemini-probe")
+async def gemini_probe(request: Request) -> dict:
+    """Probe each configured Gemini key once with a minimal JSON request."""
+    return await request.app.state.gemini.probe_all()
+
+
 @router.get("/cycles")
 async def cycles(request: Request) -> list[dict]:
     return list(request.app.state.runtime.cycles)
