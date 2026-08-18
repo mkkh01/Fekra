@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 
 
 class MarketService:
+    rest_hosts = (
+        "https://api.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://api3.binance.com",
+        "https://data-api.binance.vision",
+    )
+    retryable_statuses = {418, 429, 500, 502, 503, 504}
     symbols = [
         "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
         "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "DOTUSDT",
@@ -32,6 +40,11 @@ class MarketService:
         self.task: asyncio.Task | None = None
         self.initial_task: asyncio.Task | None = None
         self._stop = asyncio.Event()
+        self._rest_lock = asyncio.Lock()
+        self._last_rest_request = 0.0
+        self._min_rest_interval = 0.35
+        self._historical_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._historical_cache_ttl = 45.0
 
     async def start(self) -> None:
         self.initial_task = asyncio.create_task(self.load_initial_tickers(), name="binance-initial-snapshot")
@@ -47,13 +60,33 @@ class MarketService:
                 except asyncio.CancelledError:
                     pass
 
+    async def _get_binance_json(self, path: str, params: dict[str, Any]) -> Any:
+        errors: list[str] = []
+        async with self._rest_lock:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+                for host in self.rest_hosts:
+                    elapsed = time.monotonic() - self._last_rest_request
+                    if elapsed < self._min_rest_interval:
+                        await asyncio.sleep(self._min_rest_interval - elapsed)
+                    url = f"{host}{path}"
+                    self._last_rest_request = time.monotonic()
+                    try:
+                        response = await client.get(url, params=params)
+                        if response.status_code in self.retryable_statuses:
+                            errors.append(f"{host}: HTTP {response.status_code}")
+                            await asyncio.sleep(0.75 if response.status_code in {418, 429} else 0.35)
+                            continue
+                        response.raise_for_status()
+                        return response.json()
+                    except (httpx.HTTPError, ValueError) as exc:
+                        errors.append(f"{host}: {str(exc)[:180]}")
+                        await asyncio.sleep(0.25)
+                        continue
+        raise RuntimeError("Binance REST failed after host failover: " + " | ".join(errors[:5]))
+
     async def candles(self, symbol: str, interval: str = "5m", limit: int = 100) -> list[dict[str, Any]]:
-        url = "https://api.binance.com/api/v3/klines"
         params = {"symbol": symbol.upper(), "interval": interval, "limit": min(max(limit, 10), 500)}
-        async with httpx.AsyncClient(timeout=15) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            rows = response.json()
+        rows = await self._get_binance_json("/api/v3/klines", params)
         return [
             {
                 "open_time": row[0],
@@ -68,13 +101,17 @@ class MarketService:
         ]
 
     async def historical_context(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        cached = self._historical_cache.get(symbol)
+        if cached and time.monotonic() - cached[0] < self._historical_cache_ttl:
+            return json.loads(json.dumps(cached[1]))
         specs = {"5m": 120, "15m": 120, "1h": 100, "4h": 80, "1d": 60}
-        results = await asyncio.gather(
-            *(self.candles(symbol, interval, limit) for interval, limit in specs.items()),
-            return_exceptions=True,
-        )
-        context: dict[str, Any] = {"symbol": symbol.upper(), "timeframes": {}, "ready": True, "errors": []}
-        for interval, result in zip(specs, results):
+        context: dict[str, Any] = {"symbol": symbol, "timeframes": {}, "ready": True, "errors": []}
+        for interval, limit in specs.items():
+            try:
+                result = await self.candles(symbol, interval, limit)
+            except Exception as exc:
+                result = exc
             if isinstance(result, Exception):
                 context["ready"] = False
                 context["errors"].append(f"{interval}: {result}")
@@ -83,6 +120,8 @@ class MarketService:
             context["timeframes"][interval] = self._compact_candles(rows)
         if not context["timeframes"]:
             context["ready"] = False
+        if context["ready"] and len(context["timeframes"]) == len(specs):
+            self._historical_cache[symbol] = (time.monotonic(), context)
         return context
 
     @staticmethod
@@ -111,12 +150,8 @@ class MarketService:
         }
 
     async def load_initial_tickers(self) -> None:
-        url = "https://api.binance.com/api/v3/ticker/24hr"
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
-                response = await client.get(url)
-                response.raise_for_status()
-                rows = response.json()
+            rows = await self._get_binance_json("/api/v3/ticker/24hr", {})
             requested = set(self.symbols)
             for row in rows:
                 symbol = row.get("symbol")
