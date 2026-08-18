@@ -66,3 +66,25 @@ def test_structured_trade_decision_accepts_nested_levels_and_normalizes_invalida
     normalized = BrainOrchestrator._normalize_evidence_item({"price": 95, "condition": "Breakdown below structure"}, "invalidating_context")
     assert "95" in normalized["summary"]
     assert "Breakdown" in normalized["interpretation"]
+
+
+def test_validation_rejects_placeholder_and_missing_counter_evidence() -> None:
+    decision, errors = BrainOrchestrator._validate_decision({
+        "summary": "The primary reason",
+        "evidence": [{"summary": "دليل بلا ملخص منظم"}],
+        "counter_evidence": [],
+        "invalidation": {"price": 95, "condition": "Breakdown"},
+    })
+    assert decision["evidence"] == []
+    assert any("meaningful evidence" in error for error in errors)
+    assert any("meaningful counter_evidence" in error for error in errors)
+
+
+def test_finalized_score_matches_confidence_and_news_is_zero_without_news() -> None:
+    history = complete_history({"5m": 0.1, "15m": 0.2, "1h": 1.0, "4h": 2.0, "1d": 3.0})
+    context = BrainOrchestrator._build_market_context(history, {"price": 100, "updated_at": "now"}, True, [])
+    decision = BrainOrchestrator._finalize_decision({"trade_decision": "WAIT", "trade_setup": {}, "scoring": {"factor_scores": {"momentum": 60, "liquidity": 50, "volatility": 40}}}, context, [])
+    assert decision["scoring"]["approval_score"] == decision["confidence"]
+    assert decision["scoring"]["news_contribution_pct"] == 0
+    assert round(sum(decision["scoring"]["contribution_pct"].values()), 2) == 100
+    assert decision["consensus"] == "Single AI Analysis"

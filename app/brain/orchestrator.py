@@ -141,7 +141,24 @@ class BrainOrchestrator:
                 "scoring": self._normalize_scoring({}),
             }
             result = {"ok": True, "model": "historical-warmup-guard", "account_index": None}
+        decision, validation_errors = self._validate_decision(decision)
+        if validation_errors:
+            decision["trade_decision"] = "WAIT"
+            decision["action"] = "WAIT"
+            decision["public_action"] = "WAIT"
+            decision["rejection_reasons"] = list(decision.get("rejection_reasons") or []) + validation_errors
         decision = self._finalize_decision(decision, market_context, news_assessments, previous_cycle)
+        decision, final_validation_errors = self._validate_decision(decision)
+        all_validation_errors = validation_errors + final_validation_errors
+        if all_validation_errors:
+            decision["trade_decision"] = "WAIT"
+            decision["action"] = "WAIT"
+            decision["public_action"] = "WAIT"
+            decision["rejection_reasons"] = list(dict.fromkeys(list(decision.get("rejection_reasons") or []) + all_validation_errors))
+            decision["validation"] = {"valid": False, "errors": decision["rejection_reasons"]}
+            decision["summary"] = "WAIT: تم رفض التحليل لأنه لم يجتز طبقة التحقق المطلوبة."
+        else:
+            decision["validation"] = {"valid": True, "errors": []}
         cycle = {
             "id": str(uuid.uuid4()),
             "started_at": started,
@@ -370,6 +387,57 @@ class BrainOrchestrator:
         return assessments
 
     @staticmethod
+    def _text_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        if isinstance(value, (int, float, bool)):
+            return str(value)
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _clean_evidence_items(items: Any) -> list[dict[str, Any]]:
+        cleaned: list[dict[str, Any]] = []
+        values = items if isinstance(items, list) else [items] if items else []
+        for item in values:
+            if isinstance(item, dict):
+                normalized = BrainOrchestrator._normalize_evidence_item(item, "evidence")
+                summary = BrainOrchestrator._text_value(normalized.get("summary"))
+                if summary and summary.lower() not in {"null", "undefined", "object", "[object object]", "دليل بلا ملخص منظم", "غير محدد"}:
+                    normalized["summary"] = summary
+                    normalized["interpretation"] = BrainOrchestrator._text_value(normalized.get("interpretation"))
+                    cleaned.append(normalized)
+            else:
+                summary = BrainOrchestrator._text_value(item)
+                if summary and summary.lower() not in {"null", "undefined", "object", "[object object]", "دليل بلا ملخص منظم", "غير محدد"}:
+                    cleaned.append({"type": "evidence", "summary": summary, "interpretation": "", "source": "", "source_name": "", "timestamp": ""})
+        return cleaned
+
+    @staticmethod
+    def _validate_decision(decision: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        errors: list[str] = []
+        placeholder_pattern = re.compile(r"(?:^|\s)(?:null|undefined|object|\[object object\]|دليل بلا ملخص منظم|غير محدد)(?:$|\s)", re.IGNORECASE)
+        for key in ("summary", "thesis"):
+            value = BrainOrchestrator._text_value(decision.get(key))
+            if value and placeholder_pattern.search(value):
+                errors.append(f"{key} contains a placeholder")
+            elif value:
+                decision[key] = value
+        for key in ("evidence", "counter_evidence"):
+            decision[key] = BrainOrchestrator._clean_evidence_items(decision.get(key))
+            if not decision[key]:
+                errors.append(f"missing meaningful {key}")
+        decision["alternative_hypotheses"] = BrainOrchestrator._clean_evidence_items(decision.get("alternative_hypotheses"))
+        invalidation = decision.get("invalidation") if isinstance(decision.get("invalidation"), dict) else {}
+        if not invalidation.get("price") or not invalidation.get("condition"):
+            errors.append("missing invalidation price or condition")
+        for key in ("market_bias", "trade_decision", "market_regime"):
+            if decision.get(key) is not None and not isinstance(decision.get(key), str):
+                errors.append(f"{key} is not a string")
+        return decision, errors
+
+    @staticmethod
     def _finalize_decision(decision: dict[str, Any], market: dict[str, Any], news_assessments: list[dict[str, Any]], previous: dict[str, Any] | None = None) -> dict[str, Any]:
         bias = market.get("market_bias", "NEUTRAL")
         requested = str(decision.get("trade_decision") or ("LONG_READY" if decision.get("action") == "BUY" else "SHORT_READY" if decision.get("action") == "SELL_REDUCE" else "WAIT")).upper()
@@ -412,6 +480,8 @@ class BrainOrchestrator:
         factor_scores["volume"] = round(min(100.0, max(0.0, float(market.get("volume_ratio", 0) or 0) * 70.0)), 2)
         factor_scores["support_resistance"] = 45.0 if market.get("liquidity", {}).get("near_resistance" if bias == "LONG" else "near_support") else 75.0
         factor_scores["risk_reward"] = round(min(100.0, max(0.0, rr / 2.0 * 100.0)), 2)
+        if not news_assessments:
+            factor_scores["news"] = 0.0
         normalized_scores = {}
         for key in ("market_structure", "trend", "momentum", "liquidity", "volume", "volatility", "support_resistance", "news", "data_quality", "risk_reward"):
             try:
@@ -419,9 +489,20 @@ class BrainOrchestrator:
             except (TypeError, ValueError):
                 normalized_scores[key] = 0.0
         confidence = round(sum(normalized_scores.values()) / len(normalized_scores), 2)
+        news_weight = min(10.0, round(normalized_scores.get("news", 0.0) / 10.0, 2)) if news_assessments else 0.0
+        weight_keys = [key for key in normalized_scores if key != "news"]
+        weight_total = sum(normalized_scores[key] for key in weight_keys)
+        remaining_weight = 100.0 - news_weight
+        contributions = {key: round(normalized_scores[key] * remaining_weight / weight_total, 2) for key in weight_keys} if weight_total > 0 else {"market_structure": remaining_weight}
+        contributions["news"] = news_weight
+        contribution_delta = round(100.0 - sum(contributions.values()), 2)
+        anchor = next((key for key in contributions if key != "news"), "market_structure")
+        contributions[anchor] = round(contributions.get(anchor, 0.0) + contribution_delta, 2)
         invalidation = decision.get("invalidation") if isinstance(decision.get("invalidation"), dict) else {}
         if not invalidation and setup.get("stop_loss"):
             invalidation = {"price": setup.get("stop_loss"), "condition": "كسر البنية المقابلة مع حجم مؤكد"}
+        if not invalidation:
+            invalidation = {"price": market.get("levels", {}).get("support") or market.get("levels", {}).get("resistance") or "غير متاح لعدم اكتمال البيانات", "condition": "لا يُعتمد القرار قبل توفر مستوى إبطال بنيوي واضح"}
         scenarios = decision.get("alternative_scenarios") if isinstance(decision.get("alternative_scenarios"), list) else []
         if len(scenarios) < 3:
             scenarios = [
@@ -436,7 +517,10 @@ class BrainOrchestrator:
         decision["trade_decision"] = trade_decision
         decision["market_bias"] = bias
         decision["market_regime"] = market.get("market_regime")
+        uncertainty_score = round(max(0.0, min(100.0, 100.0 - confidence + (10.0 if strong_contradiction else 0.0))), 2)
+        uncertainty_level = "high" if uncertainty_score >= 60 else "medium" if uncertainty_score >= 30 else "low"
         decision["confidence"] = confidence
+        decision["scoring"] = {**(decision.get("scoring") or {}), "approval_score": confidence, "contribution_pct": contributions, "factor_scores": normalized_scores, "news_contribution_pct": news_weight, "news_cap_pct": 10, "weighting_mode": "deterministic_factor_scores"}
         decision["data_quality"] = market.get("data_quality", 0)
         decision["data_quality_breakdown"] = market.get("data_quality_breakdown", {})
         decision["factor_scores"] = normalized_scores
@@ -445,12 +529,18 @@ class BrainOrchestrator:
         decision["take_profit"] = decision.get("take_profit") if isinstance(decision.get("take_profit"), dict) else {"price": setup.get("take_profit"), "reason": "مستوى سيولة/مقاومة أو دعم HTF"}
         decision["take_profit_targets"] = setup.get("take_profit_targets", [])
         decision["risk_reward"] = rr
-        decision["trigger_status"] = market.get("trigger_status", {})
+        trigger_status = dict(market.get("trigger_status", {}))
+        trigger_status["status"] = "TRIGGERED" if trigger_status.get("confirmed") else "WAITING"
+        decision["trigger_status"] = trigger_status
         decision["news_assessments"] = news_assessments
         decision["alternative_scenarios"] = scenarios
         decision["invalidation"] = invalidation
         decision["rejection_reasons"] = rejection
-        decision["consensus"] = "HTF_ALIGNED" if market.get("htf_alignment") else "MIXED_TIMEFRAME"
+        decision["uncertainty_score"] = uncertainty_score
+        decision["uncertainty"] = uncertainty_level
+        decision["uncertainty_reasons"] = rejection[:4] or ["لا يوجد تعارض قوي، لكن التأكد المستقبلي مطلوب"]
+        decision["consensus"] = "Single AI Analysis"
+        decision["consensus_detail"] = {"votes": {"LONG": 1 if trade_decision == "LONG_READY" else 0, "WAIT": 1 if trade_decision == "WAIT" else 0, "SHORT": 1 if trade_decision == "SHORT_READY" else 0}, "winner": "LONG" if trade_decision == "LONG_READY" else "SHORT" if trade_decision == "SHORT_READY" else "WAIT", "percentage": 100.0, "analysis_count": 1}
         decision["final_review"] = {
             "strong_contrary_evidence": strong_contradiction,
             "better_alternative": len(scenarios) >= 3,
