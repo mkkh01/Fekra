@@ -15,7 +15,7 @@ from app.storage.store import StorageManager
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
-SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
+SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
 
 
 class BrainOrchestrator:
@@ -124,6 +124,42 @@ class BrainOrchestrator:
         return cycle
 
     @staticmethod
+    def _as_list(value: Any) -> list[Any]:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        return [value]
+
+    @staticmethod
+    def _normalize_evidence_item(item: Any, default_type: str) -> dict[str, Any]:
+        if isinstance(item, str):
+            candidate = item.strip()
+            if candidate.startswith("{"):
+                try:
+                    decoded = json.loads(candidate)
+                    if isinstance(decoded, dict):
+                        item = decoded
+                except json.JSONDecodeError:
+                    pass
+            if isinstance(item, str):
+                return {"type": default_type, "summary": candidate, "interpretation": "", "source": "", "timestamp": ""}
+        if not isinstance(item, dict):
+            return {"type": default_type, "summary": str(item), "interpretation": "", "source": "", "timestamp": ""}
+        data = item.get("data") if isinstance(item.get("data"), dict) else {}
+        summary = item.get("summary") or item.get("statement") or item.get("thesis") or data.get("summary") or "بيان من سياق التحليل"
+        interpretation = item.get("interpretation") or item.get("reason") or item.get("explanation") or ""
+        source = item.get("source") or item.get("url") or data.get("source") or data.get("url") or ""
+        timestamp = item.get("timestamp") or item.get("published_at") or item.get("retrieved_at") or data.get("timestamp") or data.get("published_at") or ""
+        return {
+            "type": str(item.get("type") or item.get("evidence_type") or default_type),
+            "summary": str(summary),
+            "interpretation": str(interpretation),
+            "source": str(source),
+            "timestamp": str(timestamp),
+        }
+
+    @staticmethod
     def _parse_decision(result: dict[str, Any]) -> dict[str, Any]:
         if not result.get("ok"):
             return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high"}
@@ -137,6 +173,8 @@ class BrainOrchestrator:
             action = parsed.get("action", "WAIT")
             if action not in {"BUY", "SELL_REDUCE", "WAIT", "NO_TRADE", "MONITOR", "CLOSE"}:
                 parsed["action"] = "WAIT"
+            for key in ("evidence", "counter_evidence", "alternative_hypotheses", "invalidating_context"):
+                parsed[key] = [BrainOrchestrator._normalize_evidence_item(item, key) for item in BrainOrchestrator._as_list(parsed.get(key))]
             return parsed
         except json.JSONDecodeError:
             return {
