@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     app.state.runtime = state
     app.state.market = market
     app.state.news = news
-    brain = BrainOrchestrator(state, gemini, storage)
+    brain = BrainOrchestrator(state, gemini, storage, market)
 
     app.state.gemini = gemini
     app.state.brain = brain

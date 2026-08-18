@@ -89,6 +89,7 @@ class StorageManager:
             "summary": cycle.get("summary"),
             "final_decision": cycle.get("final_decision"),
             "model": cycle.get("model"),
+            "analysis_inputs": cycle.get("inputs", {}),
         }
         try:
             await asyncio.to_thread(lambda: self.supabase.table("brain_cycles").upsert(payload).execute())

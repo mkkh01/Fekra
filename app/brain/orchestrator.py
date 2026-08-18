@@ -9,20 +9,22 @@ from typing import Any
 
 from app.brain.gemini import GeminiKeyPool
 from app.config.settings import get_settings
+from app.market.service import MarketService
 from app.state import RuntimeState
 from app.storage.store import StorageManager
 
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
-SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context, scoring. The scoring object must contain approval_score from 0 to 100 and contribution_pct, an object whose numeric values sum to 100. News/news_sentiment contribution must never exceed 10; distribute the remaining 90 dynamically among market structure, momentum, liquidity, volatility, risk/reward, data quality, or other relevant factors. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
+SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context, trade_setup, scoring. The trade_setup object must contain entry_price, stop_loss, and take_profit when and only when a directional action is justified. The scoring object must contain approval_score from 0 to 100 and contribution_pct, an object whose numeric values sum to 100. News/news_sentiment contribution must never exceed 10; distribute the remaining 90 dynamically among market structure, momentum, liquidity, volatility, risk/reward, data quality, or other relevant factors. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
 
 
 class BrainOrchestrator:
-    def __init__(self, state: RuntimeState, gemini: GeminiKeyPool, storage: StorageManager) -> None:
+    def __init__(self, state: RuntimeState, gemini: GeminiKeyPool, storage: StorageManager, market: MarketService | None = None) -> None:
         self.state = state
         self.gemini = gemini
         self.storage = storage
+        self.market = market
         self.task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._requested: asyncio.Queue[str] = asyncio.Queue()
@@ -74,20 +76,47 @@ class BrainOrchestrator:
         self.state.brain_status = "RESEARCHING"
         started = datetime.now(UTC).isoformat()
         ticker = self.state.tickers.get(symbol, {"symbol": symbol, "status": "missing"})
-        related_news = [item for item in self.state.news if symbol in item.get("symbols", [])][:10]
-        prompt = json.dumps({
-            "objective": f"Investigate current context for {symbol} and decide whether to act or wait in PAPER mode.",
-            "market_observation": ticker,
-            "related_news": related_news,
-            "constraints": [
-                "Do not invent missing data.",
-                "Challenge the preferred explanation.",
-                "A WAIT decision is valid.",
-                "No real execution is possible.",
-            ],
-        }, ensure_ascii=False)
-        result = await self.gemini.analyze(prompt, SYSTEM_INSTRUCTION)
-        decision = self._parse_decision(result)
+        related_news = sorted(
+            (item for item in self.state.news if symbol in item.get("symbols", [])),
+            key=lambda item: item.get("published_at") or item.get("retrieved_at") or "",
+            reverse=True,
+        )[:10]
+        historical = await self.market.historical_context(symbol) if self.market is not None else {"ready": False, "timeframes": {}, "errors": ["historical provider unavailable"]}
+        news_context = [self._news_for_prompt(item) for item in related_news]
+        warmup_ready = bool(historical.get("ready")) and len(historical.get("timeframes", {})) >= 5
+        if warmup_ready:
+            prompt = json.dumps({
+                "objective": f"Investigate current context for {symbol} and decide whether to act or wait in PAPER mode.",
+                "market_observation": ticker,
+                "historical_context": historical,
+                "related_news": news_context,
+                "constraints": [
+                    "Do not invent missing data.",
+                    "Use the multi-timeframe candle context before claiming market structure, momentum, liquidity, or volatility.",
+                    "News is capped at 10% of contribution weights; distribute the remaining 90% dynamically.",
+                    "Never use risk/reward weight or propose BUY/SELL_REDUCE without valid entry_price, stop_loss, and take_profit levels.",
+                    "Treat news older than 72 hours as background context, not a fresh catalyst.",
+                    "Cite the original article URL and publication timestamp for every news-based evidence item.",
+                    "Challenge the preferred explanation.",
+                    "A WAIT decision is valid.",
+                    "No real execution is possible.",
+                ],
+            }, ensure_ascii=False)
+            result = await self.gemini.analyze(prompt, SYSTEM_INSTRUCTION)
+            decision = self._parse_decision(result)
+        else:
+            error = "Historical warm-up incomplete; safe WAIT until 5m, 15m, 1h, 4h, and 1d candles are available."
+            decision = {
+                "action": "WAIT",
+                "summary": error,
+                "evidence": [],
+                "counter_evidence": [],
+                "alternative_hypotheses": [],
+                "uncertainty": "high",
+                "invalidating_context": historical.get("errors", []),
+                "scoring": self._normalize_scoring({}),
+            }
+            result = {"ok": True, "model": "historical-warmup-guard", "account_index": None}
         cycle = {
             "id": str(uuid.uuid4()),
             "started_at": started,
@@ -102,16 +131,21 @@ class BrainOrchestrator:
             "account_index": result.get("account_index"),
             "workflow": [
                 "راقب السعر الحي من Binance",
-                f"راجع {len(related_news)} خبرًا مرتبطًا من RSS المجاني",
-                "أرسل سياق السوق والأخبار إلى Gemini للتحليل",
-                "تحقق من عقد القرار وأعد WAIT عند نقص البيانات أو فشل التحليل",
+                "حمّل شموع 5m و15m و1h و4h و1d قبل التحليل",
+                f"راجع {len(related_news)} خبرًا مرتبطًا من RSS المجاني مع المصدر والعمر",
+                "أرسل سياق السوق متعدد الأطر والأخبار إلى Gemini للتحليل" if warmup_ready else "أوقف التحليل عند نقص Historical Warm-up وأعد WAIT آمنًا",
+                "تحقق من عقد القرار والأوزان وEntry/Stop/Target قبل قبول أي اتجاه",
                 "لم يتم تنفيذ أي أمر حقيقي لأن الوضع PAPER",
             ],
             "inputs": {
                 "market_symbol": symbol,
                 "market_observation": ticker,
+                "historical_ready": warmup_ready,
+                "historical_timeframes": sorted(historical.get("timeframes", {}).keys()),
+                "historical_context": historical,
                 "news_count": len(related_news),
                 "news_sources": sorted({item.get("source", "RSS") for item in related_news}),
+                "news_items": news_context,
                 "data_timestamp": ticker.get("updated_at"),
             },
             "decision": decision,
@@ -122,6 +156,25 @@ class BrainOrchestrator:
         await self.storage.write_event("DECISION" if result.get("ok") else "SYSTEM", cycle["summary"], {"cycle_id": cycle["id"], "symbol": symbol, "action": cycle["final_decision"]})
         self.state.brain_status = "MONITORING"
         return cycle
+
+    @staticmethod
+    def _news_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
+        published = item.get("published_at") or item.get("retrieved_at")
+        age_hours = None
+        try:
+            timestamp = datetime.fromisoformat(str(published).replace("Z", "+00:00"))
+            age_hours = round(max(0.0, (datetime.now(UTC) - timestamp).total_seconds() / 3600), 2)
+        except (TypeError, ValueError):
+            pass
+        return {
+            "title": item.get("title"),
+            "summary": item.get("summary"),
+            "url": item.get("url"),
+            "source": item.get("source"),
+            "published_at": published,
+            "age_hours": age_hours,
+            "symbols": item.get("symbols", []),
+        }
 
     @staticmethod
     def _as_list(value: Any) -> list[Any]:
@@ -157,6 +210,45 @@ class BrainOrchestrator:
             "interpretation": str(interpretation),
             "source": str(source),
             "timestamp": str(timestamp),
+        }
+
+    @staticmethod
+    def _normalize_trade_setup(parsed: dict[str, Any]) -> dict[str, Any]:
+        raw = parsed.get("trade_setup") if isinstance(parsed.get("trade_setup"), dict) else {}
+        aliases = {
+            "entry_price": raw.get("entry_price", parsed.get("entry_price")),
+            "stop_loss": raw.get("stop_loss", parsed.get("stop_loss")),
+            "take_profit": raw.get("take_profit", parsed.get("take_profit")),
+        }
+        values: dict[str, float] = {}
+        for key, value in aliases.items():
+            try:
+                if value is not None:
+                    values[key] = float(value)
+            except (TypeError, ValueError):
+                pass
+        action = parsed.get("action", "WAIT")
+        valid = all(key in values and values[key] > 0 for key in aliases)
+        if valid and action == "BUY":
+            valid = values["stop_loss"] < values["entry_price"] < values["take_profit"]
+        elif valid and action == "SELL_REDUCE":
+            valid = values["take_profit"] < values["entry_price"] < values["stop_loss"]
+        if valid:
+            risk = abs(values["entry_price"] - values["stop_loss"])
+            reward = abs(values["take_profit"] - values["entry_price"])
+            valid = risk > 0 and reward > 0
+            ratio = round(reward / risk, 4) if valid else None
+        else:
+            risk = reward = 0.0
+            ratio = None
+        return {
+            "available": bool(valid),
+            "entry_price": values.get("entry_price"),
+            "stop_loss": values.get("stop_loss"),
+            "take_profit": values.get("take_profit"),
+            "risk_distance": risk,
+            "reward_distance": reward,
+            "reward_risk_ratio": ratio,
         }
 
     @staticmethod
@@ -197,18 +289,29 @@ class BrainOrchestrator:
             approval_score = min(100.0, max(0.0, float(raw.get("approval_score", parsed.get("approval_score", 0)))))
         except (TypeError, ValueError):
             approval_score = 0.0
+        trade_setup = BrainOrchestrator._normalize_trade_setup(parsed)
+        if "risk/reward" in contributions and not trade_setup["available"]:
+            contributions["risk/reward"] = 0.0
+            contributions = {label: value for label, value in contributions.items() if value > 0}
+            total = sum(contributions.values()) or 1.0
+            contributions = {label: round(value * 100 / total, 2) for label, value in contributions.items()}
+            delta = round(100.0 - sum(contributions.values()), 2)
+            anchor = next((label for label in contributions if label != "news"), "market_structure")
+            contributions[anchor] = round(contributions.get(anchor, 0.0) + delta, 2)
         return {
             "approval_score": round(approval_score, 2),
             "contribution_pct": contributions,
             "news_cap_pct": 10,
             "news_contribution_pct": contributions.get("news", 0),
             "weighting_mode": "gemini_dynamic_90_plus_news_cap_10",
+            "trade_setup": trade_setup,
+            "risk_reward_available": trade_setup["available"],
         }
 
     @staticmethod
     def _parse_decision(result: dict[str, Any]) -> dict[str, Any]:
         if not result.get("ok"):
-            return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "scoring": BrainOrchestrator._normalize_scoring({})}
+            return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "trade_setup": BrainOrchestrator._normalize_trade_setup({}), "scoring": BrainOrchestrator._normalize_scoring({})}
         text = (result.get("text") or "").strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -221,7 +324,12 @@ class BrainOrchestrator:
                 parsed["action"] = "WAIT"
             for key in ("evidence", "counter_evidence", "alternative_hypotheses", "invalidating_context"):
                 parsed[key] = [BrainOrchestrator._normalize_evidence_item(item, key) for item in BrainOrchestrator._as_list(parsed.get(key))]
+            parsed["trade_setup"] = BrainOrchestrator._normalize_trade_setup(parsed)
             parsed["scoring"] = BrainOrchestrator._normalize_scoring(parsed)
+            if parsed.get("action") in {"BUY", "SELL_REDUCE"} and not parsed["trade_setup"]["available"]:
+                parsed["action"] = "WAIT"
+                parsed["summary"] = "لا يوجد Entry/Stop Loss/Take Profit صالح؛ تم تحويل الاتجاه إلى WAIT آمن."
+                parsed["uncertainty"] = "high"
             return parsed
         except json.JSONDecodeError:
             return {
@@ -232,5 +340,6 @@ class BrainOrchestrator:
                 "alternative_hypotheses": [],
                 "uncertainty": "high",
                 "invalidating_context": [],
+                "trade_setup": BrainOrchestrator._normalize_trade_setup({}),
                 "scoring": BrainOrchestrator._normalize_scoring({}),
             }

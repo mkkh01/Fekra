@@ -67,6 +67,49 @@ class MarketService:
             for row in rows
         ]
 
+    async def historical_context(self, symbol: str) -> dict[str, Any]:
+        specs = {"5m": 120, "15m": 120, "1h": 100, "4h": 80, "1d": 60}
+        results = await asyncio.gather(
+            *(self.candles(symbol, interval, limit) for interval, limit in specs.items()),
+            return_exceptions=True,
+        )
+        context: dict[str, Any] = {"symbol": symbol.upper(), "timeframes": {}, "ready": True, "errors": []}
+        for interval, result in zip(specs, results):
+            if isinstance(result, Exception):
+                context["ready"] = False
+                context["errors"].append(f"{interval}: {result}")
+                continue
+            rows = result
+            context["timeframes"][interval] = self._compact_candles(rows)
+        if not context["timeframes"]:
+            context["ready"] = False
+        return context
+
+    @staticmethod
+    def _compact_candles(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {"count": 0, "candles": []}
+        first = rows[0]
+        last = rows[-1]
+        first_close = float(first["close"])
+        last_close = float(last["close"])
+        high = max(float(row["high"]) for row in rows)
+        low = min(float(row["low"]) for row in rows)
+        volume = sum(float(row["volume"]) for row in rows)
+        change_pct = ((last_close - first_close) / first_close * 100) if first_close else 0.0
+        return {
+            "count": len(rows),
+            "first_open_time": first.get("open_time"),
+            "last_close_time": last.get("close_time"),
+            "first_close": first_close,
+            "last_close": last_close,
+            "high": high,
+            "low": low,
+            "change_pct": round(change_pct, 4),
+            "volume_total": volume,
+            "recent_candles": rows[-20:],
+        }
+
     async def load_initial_tickers(self) -> None:
         url = "https://api.binance.com/api/v3/ticker/24hr"
         try:
