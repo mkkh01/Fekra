@@ -100,6 +100,20 @@ class BrainOrchestrator:
             "final_decision": decision.get("action", "WAIT"),
             "model": result.get("model", get_settings().gemini_model),
             "account_index": result.get("account_index"),
+            "workflow": [
+                "راقب السعر الحي من Binance",
+                f"راجع {len(related_news)} خبرًا مرتبطًا من RSS المجاني",
+                "أرسل سياق السوق والأخبار إلى Gemini للتحليل",
+                "تحقق من عقد القرار وأعد WAIT عند نقص البيانات أو فشل التحليل",
+                "لم يتم تنفيذ أي أمر حقيقي لأن الوضع PAPER",
+            ],
+            "inputs": {
+                "market_symbol": symbol,
+                "market_observation": ticker,
+                "news_count": len(related_news),
+                "news_sources": sorted({item.get("source", "RSS") for item in related_news}),
+                "data_timestamp": ticker.get("updated_at"),
+            },
             "decision": decision,
         }
         self.state.add_cycle(cycle)

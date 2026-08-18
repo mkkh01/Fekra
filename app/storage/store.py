@@ -99,6 +99,7 @@ class StorageManager:
                 "action": decision.get("action", "WAIT"),
                 "thesis": decision.get("thesis"),
                 "summary": decision.get("summary"),
+                "audience_facing_reasoning": "\n".join(cycle.get("workflow", [])),
                 "evidence": decision.get("evidence", []),
                 "counter_evidence": decision.get("counter_evidence", []),
                 "alternative_hypotheses": decision.get("alternative_hypotheses", []),
