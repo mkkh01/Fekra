@@ -44,3 +44,56 @@ def test_buy_trade_setup_calculates_reward_risk() -> None:
     })
     assert parsed["available"] is True
     assert parsed["reward_risk_ratio"] == 2.0
+
+
+def test_long_without_complete_levels_becomes_public_wait() -> None:
+    result = {
+        "ok": True,
+        "text": json.dumps({
+            "action": "LONG",
+            "summary": "Long without complete levels",
+            "evidence": [],
+            "counter_evidence": [],
+            "alternative_hypotheses": [],
+            "uncertainty": "medium",
+            "invalidating_context": [],
+            "factor_scores": {"market_structure": 70, "trend": 60, "momentum": 55, "liquidity": 50, "volume": 52, "volatility": 45, "support_resistance": 58, "news": 20, "data_quality": 90},
+            "scoring": {"approval_score": 65, "contribution_pct": {"market_structure": 90, "news": 10}},
+        }),
+    }
+    decision = BrainOrchestrator._parse_decision(result)
+    assert decision["action"] == "WAIT"
+    assert decision["public_action"] == "WAIT"
+    assert decision["scoring"]["factor_scores"]["data_quality"] == 90
+    assert decision["scoring"]["factor_scores_complete"] is True
+
+
+def test_short_with_multiple_targets_exposes_public_short() -> None:
+    result = {
+        "ok": True,
+        "text": json.dumps({
+            "action": "SHORT",
+            "summary": "Short with complete levels",
+            "evidence": [],
+            "counter_evidence": [],
+            "alternative_hypotheses": [{"type": "alternative_hypotheses", "summary": "A squeeze invalidates the short", "interpretation": "Higher timeframe resistance breaks"}],
+            "uncertainty": "medium",
+            "invalidating_context": [{"type": "invalidating_context", "summary": "Close above stop"}],
+            "trade_setup": {"entry_price": 100, "stop_loss": 105, "take_profit_targets": [{"price": 95, "reason": "First support"}, {"price": 90, "reason": "Daily support"}]},
+            "factor_scores": {"market_structure": 65, "trend": 60, "momentum": 62, "liquidity": 55, "volume": 58, "volatility": 48, "support_resistance": 70, "news": 10, "data_quality": 95},
+            "scoring": {"approval_score": 72, "contribution_pct": {"market_structure": 70, "momentum": 20, "news": 10}},
+        }),
+    }
+    decision = BrainOrchestrator._parse_decision(result)
+    assert decision["action"] == "SELL_REDUCE"
+    assert decision["public_action"] == "SHORT"
+    assert decision["trade_setup"]["available"] is True
+    assert len(decision["trade_setup"]["take_profit_targets"]) == 2
+    assert decision["trade_setup"]["take_profit"] == 90
+
+
+def test_system_instruction_requires_auditable_review() -> None:
+    from app.brain.orchestrator import SYSTEM_INSTRUCTION
+
+    for phrase in ("LONG, SHORT, WAIT", "counter_evidence", "factor_scores", "final challenge review", "original article URL", "PAPER mode"):
+        assert phrase in SYSTEM_INSTRUCTION

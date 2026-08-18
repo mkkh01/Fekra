@@ -17,7 +17,15 @@ from app.storage.store import StorageManager
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
-SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context, trade_setup, scoring. The trade_setup object must contain entry_price, stop_loss, and take_profit when and only when a directional action is justified. The scoring object must contain approval_score from 0 to 100 and contribution_pct, an object whose numeric values sum to 100. News/news_sentiment contribution must never exceed 10; distribute the remaining 90 dynamically among market structure, momentum, liquidity, volatility, risk/reward, data quality, or other relevant factors. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
+SYSTEM_INSTRUCTION = """You are Fekra Trading Brain, the primary analytical decision engine, operating in PAPER mode only. You are a team of market analysts and risk managers, not an execution engine. Produce a professional, evidence-based decision that can be audited later; do not seek a trade merely because price moved and do not predict the future.
+
+Use only the supplied Binance live observation and historical candle context for 5m, 15m, 1h, 4h, and 1d, plus the supplied free-news and economic context when available. Before deciding, explicitly investigate: market structure, higher-timeframe trend, momentum, liquidity, volume, volatility, support and resistance, news, and data quality. Do not invent missing values, indicators, sources, or economic context. A single indicator or news item must never determine direction.
+
+Perform the analysis in this order: identify supporting evidence; identify opposing evidence; create at least one plausible alternative hypothesis when the data allows; assess uncertainty; assess data quality and missing or conflicting inputs; verify Entry, Stop Loss, every Take Profit target, and risk/reward; then conduct a final challenge review. In the challenge review ask whether strong contrary evidence exists, whether a better alternative hypothesis exists, whether a higher timeframe was ignored, whether the news is material or noise, and whether the risk is worth taking. If data is incomplete, conflicting, stale, low quality, or confidence is not genuinely strong, choose WAIT.
+
+Return only valid JSON with exactly these top-level keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context, trade_setup, factor_scores, scoring, final_review. The action must be exactly one of LONG, SHORT, WAIT. LONG and SHORT are analytical decisions only; they are never real orders. Use WAIT whenever the setup is not fully valid. For LONG or SHORT, trade_setup must include entry_price, stop_loss, take_profit_targets (an array containing all targets), reward_risk_ratio, and a reason for each level. A directional decision without valid Entry, Stop Loss, at least one Take Profit target, and a positive risk/reward is invalid and must be changed to WAIT.
+
+factor_scores must give an independent 0-100 score for market_structure, trend, momentum, liquidity, volume, volatility, support_resistance, news, and data_quality. scoring must contain approval_score from 0 to 100 and contribution_pct whose numeric values sum to 100. News/news_sentiment contribution must never exceed 10; distribute the remaining 90 dynamically among the market and risk factors. Include clear evidence objects with type, summary, interpretation, source, and timestamp when available. Evidence must distinguish technical Binance candle evidence from news article evidence; news evidence must cite the original article URL, not the RSS feed URL. Include concrete uncertainty, risks, and invalidating_context. final_review must record the challenge-review conclusions. Do not include internal IDs, raw database objects, execution_request, or any real-order instruction."""
 
 
 class BrainOrchestrator:
@@ -128,7 +136,7 @@ class BrainOrchestrator:
             "status": "COMPLETED" if result.get("ok") else "ERROR",
             "objective": f"Investigate {symbol}",
             "summary": decision.get("summary", result.get("error", "No result")),
-            "final_decision": decision.get("action", "WAIT"),
+            "final_decision": decision.get("public_action", decision.get("action", "WAIT")),
             "model": result.get("model", get_settings().gemini_model),
             "account_index": result.get("account_index"),
             "workflow": [
@@ -262,27 +270,47 @@ class BrainOrchestrator:
     @staticmethod
     def _normalize_trade_setup(parsed: dict[str, Any]) -> dict[str, Any]:
         raw = parsed.get("trade_setup") if isinstance(parsed.get("trade_setup"), dict) else {}
-        aliases = {
+        values: dict[str, float] = {}
+        for key, value in {
             "entry_price": raw.get("entry_price", parsed.get("entry_price")),
             "stop_loss": raw.get("stop_loss", parsed.get("stop_loss")),
-            "take_profit": raw.get("take_profit", parsed.get("take_profit")),
-        }
-        values: dict[str, float] = {}
-        for key, value in aliases.items():
+        }.items():
             try:
                 if value is not None:
                     values[key] = float(value)
             except (TypeError, ValueError):
                 pass
-        action = parsed.get("action", "WAIT")
-        valid = all(key in values and values[key] > 0 for key in aliases)
-        if valid and action == "BUY":
-            valid = values["stop_loss"] < values["entry_price"] < values["take_profit"]
-        elif valid and action == "SELL_REDUCE":
-            valid = values["take_profit"] < values["entry_price"] < values["stop_loss"]
-        if valid:
+        raw_targets = raw.get("take_profit_targets") or raw.get("targets") or parsed.get("take_profit_targets")
+        if not isinstance(raw_targets, list):
+            raw_targets = [raw.get("take_profit", parsed.get("take_profit"))]
+        targets: list[dict[str, Any]] = []
+        for index, target in enumerate(raw_targets, start=1):
+            reason = ""
+            candidate = target
+            if isinstance(target, dict):
+                candidate = target.get("price", target.get("take_profit", target.get("value")))
+                reason = str(target.get("reason") or target.get("rationale") or "")
+            try:
+                price = float(candidate)
+                if price > 0:
+                    targets.append({"target": index, "price": price, "reason": reason})
+            except (TypeError, ValueError):
+                continue
+        action = str(parsed.get("action", "WAIT")).upper()
+        long_action = action in {"BUY", "LONG"}
+        short_action = action in {"SELL_REDUCE", "SHORT"}
+        valid = all(key in values and values[key] > 0 for key in ("entry_price", "stop_loss")) and bool(targets)
+        if valid and long_action:
+            valid = values["stop_loss"] < values["entry_price"] and all(item["price"] > values["entry_price"] for item in targets)
+        elif valid and short_action:
+            valid = values["stop_loss"] > values["entry_price"] and all(item["price"] < values["entry_price"] for item in targets)
+        elif action not in {"BUY", "SELL_REDUCE", "LONG", "SHORT"}:
+            valid = False
+        selected_target = max(targets, key=lambda item: item["price"]) if long_action and targets else min(targets, key=lambda item: item["price"]) if short_action and targets else None
+        take_profit = selected_target["price"] if selected_target else None
+        if valid and take_profit is not None:
             risk = abs(values["entry_price"] - values["stop_loss"])
-            reward = abs(values["take_profit"] - values["entry_price"])
+            reward = abs(take_profit - values["entry_price"])
             valid = risk > 0 and reward > 0
             ratio = round(reward / risk, 4) if valid else None
         else:
@@ -292,7 +320,8 @@ class BrainOrchestrator:
             "available": bool(valid),
             "entry_price": values.get("entry_price"),
             "stop_loss": values.get("stop_loss"),
-            "take_profit": values.get("take_profit"),
+            "take_profit": take_profit,
+            "take_profit_targets": targets,
             "risk_distance": risk,
             "reward_distance": reward,
             "reward_risk_ratio": ratio,
@@ -345,8 +374,32 @@ class BrainOrchestrator:
             delta = round(100.0 - sum(contributions.values()), 2)
             anchor = next((label for label in contributions if label != "news"), "market_structure")
             contributions[anchor] = round(contributions.get(anchor, 0.0) + delta, 2)
+        factor_sources = parsed.get("factor_scores") if isinstance(parsed.get("factor_scores"), dict) else raw.get("factor_scores")
+        factor_sources = factor_sources if isinstance(factor_sources, dict) else {}
+        factor_aliases = {
+            "market_structure": {"market_structure", "market structure", "structure"},
+            "trend": {"trend", "direction"},
+            "momentum": {"momentum"},
+            "liquidity": {"liquidity"},
+            "volume": {"volume", "volume_analysis", "volume analysis"},
+            "volatility": {"volatility"},
+            "support_resistance": {"support_resistance", "support/resistance", "support resistance"},
+            "news": {"news", "news_sentiment", "news sentiment"},
+            "data_quality": {"data_quality", "data quality", "quality"},
+        }
+        factor_scores: dict[str, float] = {}
+        for canonical, aliases in factor_aliases.items():
+            candidate = next((value for key, value in factor_sources.items() if str(key).strip().lower() in aliases), 0)
+            try:
+                factor_scores[canonical] = round(min(100.0, max(0.0, float(candidate))), 2)
+            except (TypeError, ValueError):
+                factor_scores[canonical] = 0.0
+        normalized_factor_keys = {str(key).strip().lower() for key in factor_sources}
+        factor_scores_complete = all(any(alias in normalized_factor_keys for alias in aliases) for aliases in factor_aliases.values())
         return {
             "approval_score": round(approval_score, 2),
+            "factor_scores": factor_scores,
+            "factor_scores_complete": factor_scores_complete,
             "contribution_pct": contributions,
             "news_cap_pct": 10,
             "news_contribution_pct": contributions.get("news", 0),
@@ -382,27 +435,34 @@ class BrainOrchestrator:
     @staticmethod
     def _parse_decision(result: dict[str, Any]) -> dict[str, Any]:
         if not result.get("ok"):
-            return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "trade_setup": BrainOrchestrator._normalize_trade_setup({}), "scoring": BrainOrchestrator._normalize_scoring({})}
+            return {"action": "WAIT", "public_action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "trade_setup": BrainOrchestrator._normalize_trade_setup({}), "scoring": BrainOrchestrator._normalize_scoring({})}
         text = (result.get("text") or "").strip()
         parsed = BrainOrchestrator._extract_json_object(text)
         try:
             if parsed is None:
                 raise json.JSONDecodeError("No JSON object found", text, 0)
-            action = parsed.get("action", "WAIT")
-            if action not in {"BUY", "SELL_REDUCE", "WAIT", "NO_TRADE", "MONITOR", "CLOSE"}:
+            requested_action = str(parsed.get("action", "WAIT")).upper()
+            action_map = {"LONG": "BUY", "SHORT": "SELL_REDUCE", "BUY": "BUY", "SELL_REDUCE": "SELL_REDUCE", "WAIT": "WAIT"}
+            if requested_action not in action_map:
                 parsed["action"] = "WAIT"
+                parsed["public_action"] = "WAIT"
+            else:
+                parsed["action"] = action_map[requested_action]
+                parsed["public_action"] = requested_action if requested_action in {"LONG", "SHORT", "WAIT"} else {"BUY": "LONG", "SELL_REDUCE": "SHORT"}[requested_action]
             for key in ("evidence", "counter_evidence", "alternative_hypotheses", "invalidating_context"):
                 parsed[key] = [BrainOrchestrator._normalize_evidence_item(item, key) for item in BrainOrchestrator._as_list(parsed.get(key))]
             parsed["trade_setup"] = BrainOrchestrator._normalize_trade_setup(parsed)
             parsed["scoring"] = BrainOrchestrator._normalize_scoring(parsed)
             if parsed.get("action") in {"BUY", "SELL_REDUCE"} and not parsed["trade_setup"]["available"]:
                 parsed["action"] = "WAIT"
+                parsed["public_action"] = "WAIT"
                 parsed["summary"] = "لا يوجد Entry/Stop Loss/Take Profit صالح؛ تم تحويل الاتجاه إلى WAIT آمن."
                 parsed["uncertainty"] = "high"
             return parsed
         except json.JSONDecodeError:
             return {
                 "action": "WAIT",
+                "public_action": "WAIT",
                 "summary": "Gemini returned a non-structured response; defaulting to WAIT. A structured JSON response is required for evidence and scoring.",
                 "evidence": [],
                 "counter_evidence": [],
