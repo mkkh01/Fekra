@@ -110,10 +110,25 @@ class RuntimeState:
         }
 
     def dashboard_snapshot(self) -> dict[str, Any]:
+        news_by_key: dict[str, dict[str, Any]] = {}
+        for item in list(self.news):
+            key = str(item.get("url") or item.get("fingerprint") or item.get("title") or id(item))
+            news_by_key[key] = item
+        for cycle in list(self.cycles)[:5]:
+            for item in ((cycle.get("inputs") or {}).get("news_items") or []):
+                if not isinstance(item, dict):
+                    continue
+                key = str(item.get("url") or item.get("fingerprint") or item.get("title") or id(item))
+                news_by_key[key] = item
+        merged_news = sorted(
+            news_by_key.values(),
+            key=lambda item: str(item.get("published_at") or item.get("retrieved_at") or ""),
+            reverse=True,
+        )[:30]
         return {
             "health": self.health(),
             "tickers": list(self.tickers.values()),
-            "news": list(self.news)[:30],
+            "news": merged_news,
             "events": list(self.events)[:50],
             "cycles": list(self.cycles)[:20],
             "positions": self.positions,

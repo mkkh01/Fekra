@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import uuid
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 from typing import Any
 
@@ -207,6 +208,16 @@ class BrainOrchestrator:
         return cycle
 
     @staticmethod
+    def _article_source_name(url: Any, fallback: str = "") -> str:
+        try:
+            host = urlparse(str(url or "")).netloc.lower().removeprefix("www.")
+            if host:
+                return host
+        except ValueError:
+            pass
+        return fallback or "مصدر الخبر"
+
+    @staticmethod
     def _attach_news_metadata(decision: dict[str, Any], news_items: list[dict[str, Any]]) -> dict[str, Any]:
         if not news_items:
             return decision
@@ -219,27 +230,38 @@ class BrainOrchestrator:
             enriched = []
             for evidence in decision.get(group, []):
                 evidence_type = str(evidence.get("type") or "").lower()
-                is_news = "news" in evidence_type or "خبر" in evidence_type or "sentiment" in evidence_type
-                if not is_news:
-                    evidence["source"] = "Binance historical candles"
-                    evidence["source_name"] = "Binance"
-                    evidence["source_url"] = ""
-                    enriched.append(evidence)
-                    continue
-                haystack = " ".join(str(evidence.get(key) or "") for key in ("summary", "interpretation")).lower()
-                words = set(re.findall(r"[a-z0-9]{3,}", haystack))
+                summary_text = " ".join(str(evidence.get(key) or "") for key in ("summary", "interpretation")).lower()
+                explicit_urls = set(re.findall(r"https?://[^\s)]+", summary_text))
+                evidence_url = str(evidence.get("source_url") or evidence.get("source") or "")
+                words = set(re.findall(r"[a-z0-9]{3,}", summary_text))
                 best_item = None
                 best_score = 0
                 for item, item_words in searchable:
+                    article_url = str(item.get("url") or "").lower()
                     score = len(words & item_words)
+                    if article_url and any(article_url in url or url in article_url for url in explicit_urls):
+                        score += 100
+                    if article_url and article_url == evidence_url.lower():
+                        score += 100
                     if score > best_score:
                         best_item, best_score = item, score
-                if best_item is not None and best_score >= 2:
-                    evidence["source"] = best_item.get("url") or evidence.get("source", "")
-                    evidence["source_name"] = best_item.get("source") or evidence.get("source_name", "")
-                    evidence["source_url"] = best_item.get("url") or ""
+                is_news = (
+                    "news" in evidence_type or "خبر" in evidence_type or "sentiment" in evidence_type
+                    or best_item is not None and best_score >= 100
+                )
+                if is_news and best_item is not None and (best_score >= 1):
+                    article_url = best_item.get("url") or evidence.get("source_url") or evidence.get("source", "")
+                    evidence["type"] = "news"
+                    evidence["source"] = article_url
+                    evidence["source_name"] = BrainOrchestrator._article_source_name(article_url, "مصدر الخبر")
+                    evidence["source_url"] = article_url
                     evidence["timestamp"] = best_item.get("published_at") or best_item.get("retrieved_at") or evidence.get("timestamp", "")
                     evidence["age_hours"] = BrainOrchestrator._news_for_prompt(best_item).get("age_hours")
+                else:
+                    evidence["type"] = evidence.get("type") or "technical_evidence"
+                    evidence["source"] = "Binance historical candles"
+                    evidence["source_name"] = "Binance"
+                    evidence["source_url"] = ""
                 enriched.append(evidence)
             decision[group] = enriched
         decision["alternative_hypotheses"] = [
@@ -261,7 +283,10 @@ class BrainOrchestrator:
             "title": item.get("title"),
             "summary": item.get("summary"),
             "url": item.get("url"),
-            "source": item.get("source"),
+            "article_url": item.get("url"),
+            "source": item.get("url") or item.get("source"),
+            "source_feed": item.get("source"),
+            "source_name": BrainOrchestrator._article_source_name(item.get("url"), item.get("source_name", "")),
             "published_at": published,
             "age_hours": age_hours,
             "symbols": item.get("symbols", []),

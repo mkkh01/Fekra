@@ -25,7 +25,7 @@ def test_attach_news_metadata_adds_article_url_and_age() -> None:
     }]
     enriched = BrainOrchestrator._attach_news_metadata(decision, news)
     assert enriched["evidence"][0]["source"] == "https://example.com/article"
-    assert enriched["evidence"][0]["source_name"] == "Example News"
+    assert enriched["evidence"][0]["source_name"] == "example.com"
     assert enriched["alternative_hypotheses"] == []
 
 
@@ -57,8 +57,9 @@ def test_news_prompt_keeps_article_url_separate_from_feed_source() -> None:
     }
     prompt_item = BrainOrchestrator._news_for_prompt(item)
     assert prompt_item["url"] == "https://example.com/article"
-    assert prompt_item["source"] == "https://example.com/rss"
-    assert prompt_item["url"] != prompt_item["source"]
+    assert prompt_item["source"] == "https://example.com/article"
+    assert prompt_item["source_feed"] == "https://example.com/rss"
+    assert prompt_item["article_url"] == "https://example.com/article"
 
 
 def test_news_metadata_exposes_article_url() -> None:
@@ -77,4 +78,29 @@ def test_news_metadata_exposes_article_url() -> None:
     enriched = BrainOrchestrator._attach_news_metadata(decision, news)
     assert enriched["evidence"][0]["source"] == "https://example.com/article"
     assert enriched["evidence"][0]["source_url"] == "https://example.com/article"
-    assert enriched["evidence"][0]["source_name"] == "https://example.com/rss"
+    assert enriched["evidence"][0]["source_name"] == "example.com"
+
+
+def test_generic_evidence_matching_news_is_not_attributed_to_binance() -> None:
+    decision = {
+        "evidence": [{
+            "type": "evidence",
+            "summary": "News items: https://example.com/article highlights continued corporate adoption.",
+            "interpretation": "Institutional adoption is supportive",
+        }],
+        "counter_evidence": [],
+        "alternative_hypotheses": [],
+    }
+    news = [{
+        "title": "Corporate adoption expands",
+        "summary": "Institutional demand and adoption increased",
+        "url": "https://example.com/article",
+        "source": "https://example.com/rss",
+        "published_at": "2026-08-18T12:00:00+00:00",
+    }]
+    enriched = BrainOrchestrator._attach_news_metadata(decision, news)
+    item = enriched["evidence"][0]
+    assert item["type"] == "news"
+    assert item["source"] == "https://example.com/article"
+    assert item["source_url"] == "https://example.com/article"
+    assert item["source_name"] == "example.com"
