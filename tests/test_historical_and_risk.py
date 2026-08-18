@@ -95,5 +95,5 @@ def test_short_with_multiple_targets_exposes_public_short() -> None:
 def test_system_instruction_requires_auditable_review() -> None:
     from app.brain.orchestrator import SYSTEM_INSTRUCTION
 
-    for phrase in ("LONG, SHORT, WAIT", "counter_evidence", "factor_scores", "final challenge review", "original article URL", "PAPER mode"):
+    for phrase in ("market_bias must be LONG, SHORT, or NEUTRAL", "counter_evidence", "factor_scores", "contradiction review", "original article URL", "PAPER-ONLY"):
         assert phrase in SYSTEM_INSTRUCTION

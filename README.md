@@ -63,6 +63,14 @@ Health Check Path: /health
 4. Dashboard يعرض `configured_keys` من أصل 5، والحساب النشط، وعدد الطلبات والنجاحات والفشل.
 5. عند فشل جميع الحسابات، تكون النتيجة `WAIT` ولا يتوقف تدفق السوق والأخبار.
 
+## Professional decision contract
+
+The Brain now separates `market_bias` (`LONG`, `SHORT`, `NEUTRAL`) from `trade_decision` (`LONG_READY`, `SHORT_READY`, `WAIT`). A directional bias is never sufficient to authorize a paper trade. The deterministic guard rejects directional decisions unless the historical context confirms the required timeframes, data quality is at least 80, the entry trigger is confirmed, the stop is structurally grounded, targets are supported by market levels, and calculated risk/reward is at least 2.0.
+
+Each cycle records a market regime, higher-timeframe alignment, volume-to-average ratio, breakout/retest trigger status, data-quality components, bullish and bearish evidence, three alternative scenarios, invalidation, rejection reasons, a final contradiction review, and the previous/current decision comparison. The runtime evaluates prior PAPER decisions against subsequent Binance prices as `CORRECT_*`, `FALSE_*`, `MISSED_OPPORTUNITY`, or unresolved outcomes. These metrics are analytical diagnostics only and are not realized trading performance.
+
+The Dashboard shows the bias, trade decision, confidence calculated from deterministic factor scores, data quality, regime, Entry/Stop/Targets/RR, trigger status, invalidation, decision history, and accuracy diagnostics. Supabase persistence remains compatible with the existing action constraint by storing `BUY`/`SELL_REDUCE` internally while exposing `LONG_READY`/`SHORT_READY` to the analytical layer.
+
 ## Supabase
 
 تم تطبيق migration `supabase/migrations/0001_trading_brain_foundation.sql` على مشروع Supabase. تنشئ migration الأصول، اللقطات، الأخبار، دورات Brain، استدعاءات الأدوات، الفرضيات، القرارات، الأدلة، الذاكرة، الدروس، المراكز الورقية، الصفقات المغلقة، الأحداث، الإعدادات والتنبيهات، مع تفعيل RLS.

@@ -107,11 +107,31 @@ class StorageManager:
                 "uncertainty": decision.get("uncertainty"),
                 "invalidation_context": decision.get("invalidating_context", []),
                 "execution_status": "PAPER_NOT_EXECUTED",
-                "scoring": decision.get("scoring", {}),
+                "scoring": {
+                    **(decision.get("scoring", {}) or {}),
+                    "market_bias": decision.get("market_bias", "NEUTRAL"),
+                    "trade_decision": decision.get("trade_decision", "WAIT"),
+                    "confidence": decision.get("confidence", 0),
+                    "data_quality": decision.get("data_quality", 0),
+                    "market_regime": decision.get("market_regime", "UNCERTAIN"),
+                    "trigger_status": decision.get("trigger_status", {}),
+                    "invalidation": decision.get("invalidation", {}),
+                    "rejection_reasons": decision.get("rejection_reasons", []),
+                    "alternative_scenarios": decision.get("alternative_scenarios", []),
+                },
             }
             await asyncio.to_thread(lambda: self.supabase.table("brain_decisions").insert(decision_payload).execute())
         except Exception as exc:
             self._mark_supabase_failure(exc, "cycle write")
+
+    async def update_cycle_performance(self, cycle: dict[str, Any]) -> None:
+        if self.supabase is None or not self.supabase_write_enabled or not cycle.get("performance"):
+            return
+        try:
+            payload = {"analysis_inputs": cycle.get("inputs", {})}
+            await asyncio.to_thread(lambda: self.supabase.table("brain_cycles").update(payload).eq("id", cycle["id"]).execute())
+        except Exception as exc:
+            self._mark_supabase_failure(exc, "cycle performance update")
 
     async def write_news(self, item: dict[str, Any]) -> None:
         if self.supabase is None or not self.supabase_write_enabled:

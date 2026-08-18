@@ -28,6 +28,7 @@ class RuntimeState:
         self.events: deque[dict[str, Any]] = deque(maxlen=300)
         self.cycles: deque[dict[str, Any]] = deque(maxlen=100)
         self.positions: list[dict[str, Any]] = []
+        self.decision_performance: list[dict[str, Any]] = []
         self.gemini_usage: dict[str, Any] = {
             "configured_keys": 0,
             "active_key_index": None,
@@ -58,6 +59,41 @@ class RuntimeState:
     def add_cycle(self, item: dict[str, Any]) -> None:
         self.cycles.appendleft(item)
 
+    def evaluate_decision_outcomes(self, symbol: str, current_price: float) -> list[dict[str, Any]]:
+        updates: list[dict[str, Any]] = []
+        if not current_price or current_price <= 0:
+            return updates
+        for cycle in list(self.cycles):
+            if cycle.get("trigger_symbol") != symbol or cycle.get("performance"):
+                continue
+            reference = float(((cycle.get("inputs") or {}).get("market_observation") or {}).get("price") or 0)
+            if not reference or reference <= 0:
+                continue
+            change_pct = round((current_price - reference) / reference * 100, 4)
+            decision = cycle.get("final_decision", "WAIT")
+            if decision == "WAIT":
+                label = "MISSED_OPPORTUNITY" if abs(change_pct) >= 3 else "CORRECT_WAIT" if abs(change_pct) < 1 else "WAIT_UNRESOLVED"
+            elif decision == "LONG_READY":
+                label = "FALSE_LONG" if change_pct <= -2 else "CORRECT_LONG" if change_pct >= 2 else "LONG_UNRESOLVED"
+            elif decision == "SHORT_READY":
+                label = "FALSE_SHORT" if change_pct >= 2 else "CORRECT_SHORT" if change_pct <= -2 else "SHORT_UNRESOLVED"
+            else:
+                label = "UNRESOLVED"
+            performance = {"status": label, "reference_price": reference, "latest_price": current_price, "change_pct": change_pct, "evaluated_at": utc_now()}
+            cycle["performance"] = performance
+            cycle["inputs"] = {**(cycle.get("inputs") or {}), "performance": performance}
+            updates.append(cycle)
+            self.decision_performance.insert(0, {"cycle_id": cycle.get("id"), "symbol": symbol, "decision": decision, **performance})
+        self.decision_performance = self.decision_performance[:100]
+        return updates
+
+    def performance_summary(self) -> dict[str, Any]:
+        completed = [item for item in self.decision_performance if item.get("status", "").startswith(("CORRECT_", "FALSE_", "MISSED_"))]
+        correct = sum(1 for item in completed if item.get("status", "").startswith("CORRECT_"))
+        false = sum(1 for item in completed if item.get("status", "").startswith("FALSE_"))
+        missed = sum(1 for item in completed if item.get("status") == "MISSED_OPPORTUNITY")
+        return {"evaluated": len(completed), "correct": correct, "false": false, "missed_opportunities": missed, "accuracy_pct": round(correct / len(completed) * 100, 2) if completed else None, "recent": self.decision_performance[:20]}
+
     def health(self) -> dict[str, Any]:
         return {
             "app": "ok",
@@ -81,5 +117,6 @@ class RuntimeState:
             "events": list(self.events)[:50],
             "cycles": list(self.cycles)[:20],
             "positions": self.positions,
+            "performance": self.performance_summary(),
             "gemini_usage": self.gemini_usage,
         }
