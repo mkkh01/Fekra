@@ -104,3 +104,20 @@ def test_gemini_argument_objects_become_meaningful_canonical_evidence() -> None:
 def test_text_list_never_splits_a_string_into_characters() -> None:
     assert BrainOrchestrator._text_list("Price is currently under resistance") == ["Price is currently under resistance"]
     assert BrainOrchestrator._text_list(["First reason", "Second reason"]) == ["First reason", "Second reason"]
+
+
+def test_nested_wrapper_payload_preserves_evidence_text_and_source() -> None:
+    assert BrainOrchestrator._clean_evidence_items({
+        "evidence": [
+            {"evidence": "Daily trend remains constructive", "source": "Binance candles"}
+        ]
+    })[0]["summary"] == "Daily trend remains constructive"
+    assert BrainOrchestrator._clean_evidence_items({
+        "counter_evidence": "Resistance rejected price",
+    })[0]["summary"] == "Resistance rejected price"
+
+
+def test_rejection_history_from_single_string_remains_one_item() -> None:
+    decision = {"rejection_reasons": "Price is currently under immediate resistance"}
+    finalized = BrainOrchestrator._text_list(decision["rejection_reasons"])
+    assert finalized == ["Price is currently under immediate resistance"]

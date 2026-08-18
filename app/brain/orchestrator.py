@@ -397,9 +397,29 @@ class BrainOrchestrator:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
     @staticmethod
+    def _flatten_evidence_items(items: Any) -> list[Any]:
+        if items is None or items == "":
+            return []
+        values = items if isinstance(items, list) else [items]
+        flattened: list[Any] = []
+        wrapper_keys = ("evidence", "counter_evidence", "bullish_arguments", "bearish_arguments", "arguments", "items", "points")
+        for item in values:
+            if isinstance(item, list):
+                flattened.extend(BrainOrchestrator._flatten_evidence_items(item))
+                continue
+            if isinstance(item, dict):
+                nested_key = next((key for key in wrapper_keys if key in item and item[key] not in (None, "")), None)
+                meaningful_keys = {"summary", "statement", "thesis", "hypothesis", "description", "label", "reason", "source", "url", "type", "evidence_type", "price", "condition"}
+                if nested_key and not (set(item) & meaningful_keys - {nested_key}):
+                    flattened.extend(BrainOrchestrator._flatten_evidence_items(item[nested_key]))
+                    continue
+            flattened.append(item)
+        return flattened
+
+    @staticmethod
     def _clean_evidence_items(items: Any) -> list[dict[str, Any]]:
         cleaned: list[dict[str, Any]] = []
-        values = items if isinstance(items, list) else [items] if items else []
+        values = BrainOrchestrator._flatten_evidence_items(items)
         for item in values:
             if isinstance(item, dict):
                 normalized = BrainOrchestrator._normalize_evidence_item(item, "evidence")
@@ -593,7 +613,7 @@ class BrainOrchestrator:
         structured_summary = ""
         if item.get("price") is not None or item.get("condition"):
             structured_summary = f"السعر: {item.get('price', '—')} · الشرط: {item.get('condition', '—')}"
-        summary = item.get("summary") or item.get("statement") or item.get("thesis") or item.get("hypothesis") or item.get("description") or item.get("label") or item.get("evidence") or item.get("reason") or data.get("summary") or data.get("statement") or data.get("hypothesis") or data.get("description") or data.get("evidence") or structured_summary or ""
+        summary = item.get("summary") or item.get("statement") or item.get("thesis") or item.get("hypothesis") or item.get("description") or item.get("label") or item.get("evidence") or item.get("counter_evidence") or item.get("bullish_arguments") or item.get("bearish_arguments") or item.get("reason") or data.get("summary") or data.get("statement") or data.get("hypothesis") or data.get("description") or data.get("evidence") or structured_summary or ""
         interpretation = item.get("interpretation") or item.get("reason") or item.get("explanation") or data.get("interpretation") or item.get("condition") or ""
         source = item.get("source") or item.get("url") or data.get("source") or data.get("url") or ""
         timestamp = item.get("timestamp") or item.get("published_at") or item.get("retrieved_at") or data.get("timestamp") or data.get("published_at") or ""
@@ -788,6 +808,8 @@ class BrainOrchestrator:
                 parsed["evidence"] = parsed.get("bullish_arguments") or []
             if not parsed.get("counter_evidence"):
                 parsed["counter_evidence"] = parsed.get("bearish_arguments") or []
+            parsed["evidence"] = BrainOrchestrator._clean_evidence_items(parsed.get("evidence"))
+            parsed["counter_evidence"] = BrainOrchestrator._clean_evidence_items(parsed.get("counter_evidence"))
             requested_action = str(parsed.get("trade_decision") or parsed.get("action", "WAIT")).upper()
             action_map = {"LONG_READY": "BUY", "SHORT_READY": "SELL_REDUCE", "LONG": "BUY", "SHORT": "SELL_REDUCE", "BUY": "BUY", "SELL_REDUCE": "SELL_REDUCE", "WAIT": "WAIT"}
             if requested_action not in action_map:
