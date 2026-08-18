@@ -15,7 +15,7 @@ from app.storage.store import StorageManager
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
-SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
+SYSTEM_INSTRUCTION = """You are Fekra Trading Brain in PAPER mode. You are a market research agent, not an execution engine. Distinguish observations from inferences, state uncertainty, propose alternatives, and prefer WAIT or NO_TRADE when evidence is insufficient. Never invent data or news. Return only valid JSON with keys: action, thesis, summary, evidence, counter_evidence, alternative_hypotheses, uncertainty, invalidating_context, scoring. The scoring object must contain approval_score from 0 to 100 and contribution_pct, an object whose numeric values sum to 100. News/news_sentiment contribution must never exceed 10; distribute the remaining 90 dynamically among market structure, momentum, liquidity, volatility, risk/reward, data quality, or other relevant factors. Each evidence item should be an object with type, summary, interpretation, source, and timestamp when available; do not include internal IDs or raw database objects. Allowed actions: BUY, SELL_REDUCE, WAIT, NO_TRADE, MONITOR, CLOSE. Since this is PAPER mode, execution_request must not be included and no real order may be proposed."""
 
 
 class BrainOrchestrator:
@@ -160,9 +160,55 @@ class BrainOrchestrator:
         }
 
     @staticmethod
+    def _normalize_scoring(parsed: dict[str, Any]) -> dict[str, Any]:
+        raw = parsed.get("scoring") if isinstance(parsed.get("scoring"), dict) else {}
+        raw_contributions = raw.get("contribution_pct") or raw.get("score_breakdown") or parsed.get("score_breakdown") or {}
+        if isinstance(raw_contributions, list):
+            raw_contributions = {str(item.get("factor", item.get("category", "factor"))): item.get("contribution_pct", item.get("value", 0)) for item in raw_contributions if isinstance(item, dict)}
+        if not isinstance(raw_contributions, dict):
+            raw_contributions = {}
+        cleaned: dict[str, float] = {}
+        news_value = 0.0
+        for key, value in raw_contributions.items():
+            try:
+                number = max(0.0, float(value))
+            except (TypeError, ValueError):
+                continue
+            label = str(key).strip() or "other"
+            normalized_label = label.lower().replace(" ", "_")
+            if normalized_label in {"news", "news_sentiment", "news_impact", "الأخبار"}:
+                news_value += number
+            else:
+                cleaned[label] = cleaned.get(label, 0.0) + number
+        news_value = min(news_value, 10.0)
+        remaining = max(0.0, 100.0 - news_value)
+        other_total = sum(cleaned.values())
+        if other_total <= 0:
+            cleaned = {"market_structure": remaining}
+        else:
+            cleaned = {label: value * remaining / other_total for label, value in cleaned.items()}
+        contributions = {**cleaned, "news": news_value}
+        contributions = {label: round(value, 2) for label, value in contributions.items() if value > 0}
+        rounding_delta = round(100.0 - sum(contributions.values()), 2)
+        if rounding_delta:
+            anchor = next((label for label in contributions if label != "news"), "market_structure")
+            contributions[anchor] = round(contributions.get(anchor, 0.0) + rounding_delta, 2)
+        try:
+            approval_score = min(100.0, max(0.0, float(raw.get("approval_score", parsed.get("approval_score", 0)))))
+        except (TypeError, ValueError):
+            approval_score = 0.0
+        return {
+            "approval_score": round(approval_score, 2),
+            "contribution_pct": contributions,
+            "news_cap_pct": 10,
+            "news_contribution_pct": contributions.get("news", 0),
+            "weighting_mode": "gemini_dynamic_90_plus_news_cap_10",
+        }
+
+    @staticmethod
     def _parse_decision(result: dict[str, Any]) -> dict[str, Any]:
         if not result.get("ok"):
-            return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high"}
+            return {"action": "WAIT", "summary": result.get("error", "Gemini unavailable"), "uncertainty": "high", "scoring": BrainOrchestrator._normalize_scoring({})}
         text = (result.get("text") or "").strip()
         if text.startswith("```"):
             text = text.strip("`")
@@ -175,6 +221,7 @@ class BrainOrchestrator:
                 parsed["action"] = "WAIT"
             for key in ("evidence", "counter_evidence", "alternative_hypotheses", "invalidating_context"):
                 parsed[key] = [BrainOrchestrator._normalize_evidence_item(item, key) for item in BrainOrchestrator._as_list(parsed.get(key))]
+            parsed["scoring"] = BrainOrchestrator._normalize_scoring(parsed)
             return parsed
         except json.JSONDecodeError:
             return {
@@ -185,4 +232,5 @@ class BrainOrchestrator:
                 "alternative_hypotheses": [],
                 "uncertainty": "high",
                 "invalidating_context": [],
+                "scoring": BrainOrchestrator._normalize_scoring({}),
             }

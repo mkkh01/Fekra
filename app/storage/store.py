@@ -106,6 +106,7 @@ class StorageManager:
                 "uncertainty": decision.get("uncertainty"),
                 "invalidation_context": decision.get("invalidating_context", []),
                 "execution_status": "PAPER_NOT_EXECUTED",
+                "scoring": decision.get("scoring", {}),
             }
             await asyncio.to_thread(lambda: self.supabase.table("brain_decisions").insert(decision_payload).execute())
         except Exception as exc:
