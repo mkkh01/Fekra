@@ -141,7 +141,7 @@ class BrainOrchestrator:
                 "scoring": self._normalize_scoring({}),
             }
             result = {"ok": True, "model": "historical-warmup-guard", "account_index": None}
-        decision, validation_errors = self._validate_decision(decision)
+        decision, validation_errors = self._validate_decision(decision, require_invalidation=False)
         if validation_errors:
             decision["trade_decision"] = "WAIT"
             decision["action"] = "WAIT"
@@ -437,6 +437,20 @@ class BrainOrchestrator:
     @staticmethod
     def _text_list(value: Any) -> list[str]:
         values = value if isinstance(value, list) else [value] if value not in (None, "") else []
+        if isinstance(value, list):
+            compacted: list[Any] = []
+            character_buffer: list[str] = []
+            for raw in values:
+                if isinstance(raw, str) and len(raw) <= 1:
+                    character_buffer.append(raw)
+                else:
+                    if character_buffer:
+                        compacted.append("".join(character_buffer))
+                        character_buffer = []
+                    compacted.append(raw)
+            if character_buffer:
+                compacted.append("".join(character_buffer))
+            values = compacted
         result: list[str] = []
         for item in values:
             if isinstance(item, dict):
@@ -447,7 +461,7 @@ class BrainOrchestrator:
         return result
 
     @staticmethod
-    def _validate_decision(decision: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    def _validate_decision(decision: dict[str, Any], *, require_invalidation: bool = True) -> tuple[dict[str, Any], list[str]]:
         errors: list[str] = []
         placeholder_pattern = re.compile(r"(?:^|\s)(?:null|undefined|object|\[object object\]|دليل بلا ملخص منظم|غير محدد)(?:$|\s)", re.IGNORECASE)
         for key in ("summary", "thesis"):
@@ -462,7 +476,7 @@ class BrainOrchestrator:
                 errors.append(f"missing meaningful {key}")
         decision["alternative_hypotheses"] = BrainOrchestrator._clean_evidence_items(decision.get("alternative_hypotheses"))
         invalidation = decision.get("invalidation") if isinstance(decision.get("invalidation"), dict) else {}
-        if not invalidation.get("price") or not invalidation.get("condition"):
+        if require_invalidation and (not invalidation.get("price") or not invalidation.get("condition")):
             errors.append("missing invalidation price or condition")
         for key in ("market_bias", "trade_decision", "market_regime"):
             if decision.get(key) is not None and not isinstance(decision.get(key), str):
@@ -530,11 +544,14 @@ class BrainOrchestrator:
         contribution_delta = round(100.0 - sum(contributions.values()), 2)
         anchor = next((key for key in contributions if key != "news"), "market_structure")
         contributions[anchor] = round(contributions.get(anchor, 0.0) + contribution_delta, 2)
-        invalidation = decision.get("invalidation") if isinstance(decision.get("invalidation"), dict) else {}
-        if not invalidation and setup.get("stop_loss"):
-            invalidation = {"price": setup.get("stop_loss"), "condition": "كسر البنية المقابلة مع حجم مؤكد"}
-        if not invalidation:
-            invalidation = {"price": market.get("levels", {}).get("support") or market.get("levels", {}).get("resistance") or "غير متاح لعدم اكتمال البيانات", "condition": "لا يُعتمد القرار قبل توفر مستوى إبطال بنيوي واضح"}
+        invalidation = dict(decision.get("invalidation")) if isinstance(decision.get("invalidation"), dict) else {}
+        derived_price = setup.get("stop_loss") or (market.get("levels", {}).get("support") if bias == "LONG" else market.get("levels", {}).get("resistance"))
+        if not invalidation.get("price") and derived_price:
+            invalidation["price"] = derived_price
+        if not invalidation.get("condition"):
+            invalidation["condition"] = "كسر البنية المقابلة مع حجم مؤكد؛ لا يُعتمد الاتجاه قبل تحقق Trigger صالح"
+        if not invalidation.get("price"):
+            invalidation["price"] = market.get("levels", {}).get("support") or market.get("levels", {}).get("resistance")
         scenarios = decision.get("alternative_scenarios") if isinstance(decision.get("alternative_scenarios"), list) else []
         if len(scenarios) < 3:
             scenarios = [

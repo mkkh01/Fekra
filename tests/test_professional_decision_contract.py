@@ -121,3 +121,12 @@ def test_rejection_history_from_single_string_remains_one_item() -> None:
     decision = {"rejection_reasons": "Price is currently under immediate resistance"}
     finalized = BrainOrchestrator._text_list(decision["rejection_reasons"])
     assert finalized == ["Price is currently under immediate resistance"]
+
+
+def test_legacy_character_array_is_rejoined_without_merging_real_errors() -> None:
+    legacy = list("Price is under immediate resistance") + ["missing meaningful evidence", "missing invalidation price or condition"]
+    assert BrainOrchestrator._text_list(legacy) == [
+        "Price is under immediate resistance",
+        "missing meaningful evidence",
+        "missing invalidation price or condition",
+    ]
