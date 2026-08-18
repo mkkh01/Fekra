@@ -147,10 +147,13 @@ class StorageManager:
 
     def _mark_supabase_failure(self, exc: Exception, operation: str) -> None:
         message = str(exc)
-        if "401" in message or "Invalid API key" in message or "Unauthorized" in message:
+        permission_failure = "403" in message or "permission denied" in message.lower() or "insufficient_privilege" in message.lower()
+        auth_failure = "401" in message or "Invalid API key" in message or "Unauthorized" in message
+        if auth_failure or permission_failure:
             self.supabase_write_enabled = False
             if not self._supabase_auth_error_logged:
-                logger.error("Supabase authentication failed during %s; disabling further Supabase writes until restart", operation)
+                reason = "permission" if permission_failure else "authentication"
+                logger.error("Supabase %s failed during %s; disabling further Supabase writes until restart", reason, operation)
                 self._supabase_auth_error_logged = True
         else:
             logger.warning("Supabase %s failed: %s", operation, exc)
