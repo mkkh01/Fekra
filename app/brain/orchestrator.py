@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -104,6 +105,7 @@ class BrainOrchestrator:
             }, ensure_ascii=False)
             result = await self.gemini.analyze(prompt, SYSTEM_INSTRUCTION)
             decision = self._parse_decision(result)
+            decision = self._attach_news_metadata(decision, related_news)
         else:
             error = "Historical warm-up incomplete; safe WAIT until 5m, 15m, 1h, 4h, and 1d candles are available."
             decision = {
@@ -158,6 +160,39 @@ class BrainOrchestrator:
         return cycle
 
     @staticmethod
+    def _attach_news_metadata(decision: dict[str, Any], news_items: list[dict[str, Any]]) -> dict[str, Any]:
+        if not news_items:
+            return decision
+        searchable = []
+        for item in news_items:
+            text = " ".join(str(item.get(key) or "") for key in ("title", "summary")).lower()
+            words = {word for word in re.findall(r"[a-z0-9]{3,}", text) if word not in {"the", "and", "for", "with", "from", "this", "that"}}
+            searchable.append((item, words))
+        for group in ("evidence", "counter_evidence"):
+            enriched = []
+            for evidence in decision.get(group, []):
+                haystack = " ".join(str(evidence.get(key) or "") for key in ("summary", "interpretation")).lower()
+                words = set(re.findall(r"[a-z0-9]{3,}", haystack))
+                best_item = None
+                best_score = 0
+                for item, item_words in searchable:
+                    score = len(words & item_words)
+                    if score > best_score:
+                        best_item, best_score = item, score
+                if best_item is not None and best_score >= 2:
+                    evidence["source"] = best_item.get("url") or evidence.get("source", "")
+                    evidence["source_name"] = best_item.get("source") or evidence.get("source_name", "")
+                    evidence["timestamp"] = best_item.get("published_at") or best_item.get("retrieved_at") or evidence.get("timestamp", "")
+                    evidence["age_hours"] = BrainOrchestrator._news_for_prompt(best_item).get("age_hours")
+                enriched.append(evidence)
+            decision[group] = enriched
+        decision["alternative_hypotheses"] = [
+            item for item in decision.get("alternative_hypotheses", [])
+            if item.get("summary") and "بيان من سياق التحليل" not in item.get("summary", "")
+        ]
+        return decision
+
+    @staticmethod
     def _news_for_prompt(item: dict[str, Any]) -> dict[str, Any]:
         published = item.get("published_at") or item.get("retrieved_at")
         age_hours = None
@@ -200,8 +235,8 @@ class BrainOrchestrator:
         if not isinstance(item, dict):
             return {"type": default_type, "summary": str(item), "interpretation": "", "source": "", "timestamp": ""}
         data = item.get("data") if isinstance(item.get("data"), dict) else {}
-        summary = item.get("summary") or item.get("statement") or item.get("thesis") or data.get("summary") or "بيان من سياق التحليل"
-        interpretation = item.get("interpretation") or item.get("reason") or item.get("explanation") or ""
+        summary = item.get("summary") or item.get("statement") or item.get("thesis") or item.get("hypothesis") or item.get("description") or item.get("label") or data.get("summary") or data.get("statement") or data.get("hypothesis") or data.get("description") or ""
+        interpretation = item.get("interpretation") or item.get("reason") or item.get("explanation") or data.get("interpretation") or ""
         source = item.get("source") or item.get("url") or data.get("source") or data.get("url") or ""
         timestamp = item.get("timestamp") or item.get("published_at") or item.get("retrieved_at") or data.get("timestamp") or data.get("published_at") or ""
         return {
@@ -209,7 +244,9 @@ class BrainOrchestrator:
             "summary": str(summary),
             "interpretation": str(interpretation),
             "source": str(source),
+            "source_name": str(item.get("source_name") or data.get("source_name") or ""),
             "timestamp": str(timestamp),
+            "age_hours": item.get("age_hours") or data.get("age_hours"),
         }
 
     @staticmethod
@@ -268,7 +305,7 @@ class BrainOrchestrator:
                 continue
             label = str(key).strip() or "other"
             normalized_label = label.lower().replace(" ", "_")
-            if normalized_label in {"news", "news_sentiment", "news_impact", "الأخبار"}:
+            if normalized_label in {"news", "news_sentiment", "news_impact", "الأخبار"} or "news" in normalized_label or "خبر" in normalized_label or "أخبار" in normalized_label:
                 news_value += number
             else:
                 cleaned[label] = cleaned.get(label, 0.0) + number

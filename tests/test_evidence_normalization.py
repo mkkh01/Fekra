@@ -18,7 +18,9 @@ def test_normalize_evidence_removes_internal_fields() -> None:
         "summary": "Bitcoin gained 1%",
         "interpretation": "Modest positive movement",
         "source": "https://example.com/source",
+        "source_name": "",
         "timestamp": "2026-08-18T12:00:00Z",
+        "age_hours": None,
     }
     assert "id" not in normalized
     assert "data" not in normalized
