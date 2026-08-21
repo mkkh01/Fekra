@@ -118,6 +118,18 @@ async def _analyze_mtf(symbol: str) -> dict:
     }
     entry = results["15m"]
     entry_signal = entry.get("signal")
+    candidate_direction = entry.get("bias") if entry_signal not in ("LONG", "SHORT") else entry_signal
+    base_components = dict(entry.get("reversal_risk_components") or {})
+    if candidate_direction in ("LONG", "SHORT"):
+        higher_timeframe_risk = int(
+            results["1h"].get("regime") == "TRANSITION"
+            or results["4h"].get("regime") == "TRANSITION"
+            or results["1h"].get("signal") != candidate_direction
+            or results["4h"].get("signal") != candidate_direction
+        )
+        base_components["higher_timeframe"] = higher_timeframe_risk
+        entry["reversal_risk_components"] = base_components
+        entry["reversal_risk"] = sum(base_components.values())
     timeframe_signals = {interval: results[interval].get("signal") for interval in MTF_INTERVALS}
     timeframe_ready = {interval: bool(results[interval].get("ready")) for interval in MTF_INTERVALS}
     vetoes = [*data_vetoes]
