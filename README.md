@@ -35,3 +35,11 @@ The browser provides a TradingView-inspired layout without copying TradingView's
 كل صفقة آلية تحمل `source=auto_signal` و`auto_created=true` وملف الأصل وأسباب الإشارة. يمنع النظام تكرار صفقة آلية نشطة لنفس الزوج والإطار الزمني، بينما تفحص إدارة الخروج جميع الصفقات `PENDING` و`OPEN` و`PARTIAL` كل 5 ثوانٍ باستخدام سعر Binance اللحظي؛ وتغلق الصفقة عند `TAKE_PROFIT_1` أو `STOP_LOSS` وتخزن سبب الخروج والربح/الخسارة. بعد الإغلاق يمكن للفحص التالي إنشاء إشارة آلية جديدة إذا ظلت شروط الإشارة مستوفاة.
 
 يستخدم التطبيق مصدر Binance Spot موحدًا للسعر الحالي: يغذي WebSocket أحداث `@ticker` و`@kline_1m`، ويعرض السعر نفسه في خانة السعر الحالي وآخر شمعة على الشارت. طُبق قيد الصفقة النشطة في `migrations/002_auto_signal_trades.sql`.
+
+## Safe rollout and Shadow Mode
+
+يعمل الإصدار الآمن افتراضيًا في `WEEG_SHADOW_MODE=true` مع إبقاء `WEEG_SAFETY_GATES_ENABLED=false`. يسجل النظام آخر شمعة مغلقة فعليًا، عمر الإشارة، سعر الإشارة، سعر الدخول الحي، انحراف الدخول، RR بعد التنفيذ، مكونات `reversal_risk` ومؤشرات `overextension`، لكنه لا يحوّل التحذيرات إلى حظر إنتاجي قبل القياس.
+
+يحفظ جدول `weeg_shadow_signals` المرشحين المحظورين افتراضيًا ونتيجتهم الافتراضية، ويمكن قراءة الملخص من `/api/summary/shadow`. لا يجوز تفعيل حواجز الإنتاج قبل إكمال قياس baseline وWalk-Forward وPaper Canary وفق معايير القبول في خطة Weeg. تبقى حماية +1R وقياس MFE/MAE في وضع الرصد فقط، ولا ينقل التطبيق وقف الخسارة تلقائيًا.
+
+تتطلب البيئة الحالية مفاتيح `WEEG_SHADOW_MODE` و`WEEG_SAFETY_GATES_ENABLED` و`WEEG_MFE_SHADOW` و`SIGNAL_MAX_AGE_SECONDS` و`MTF_SYNC_TOLERANCE_SECONDS` عند الحاجة إلى تغيير القيم الافتراضية؛ وفي حال عدم ضبطها تُستخدم القيم الآمنة المذكورة أعلاه.

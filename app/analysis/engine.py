@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from typing import Any
 
 from app.analysis.profiles import profile_for
+from app.analysis.safety import candle_age_seconds, closed_candles, iso_from_epoch
 
 
 def _ema(values: list[float], period: int) -> list[float]:
@@ -78,6 +81,63 @@ def _regime(closes: list[float], atr: float, low_volatility: float, high_volatil
     return "TRANSITION"
 
 
+def _reversal_risk(
+    direction: str,
+    structure: str,
+    regime: str,
+    rsi: float,
+    ema20: float,
+    ema50: float,
+    drift: float,
+    profile: Any,
+) -> dict[str, Any]:
+    if direction not in ("LONG", "SHORT"):
+        return {"reversal_risk": 0, "reversal_risk_components": {}}
+    trend = int((direction == "LONG" and (ema20 < ema50 or drift < 0)) or (direction == "SHORT" and (ema20 > ema50 or drift > 0)))
+    structure_risk = int((direction == "LONG" and structure == "BEARISH") or (direction == "SHORT" and structure == "BULLISH"))
+    momentum_risk = int((direction == "LONG" and rsi < profile.rsi_long_min) or (direction == "SHORT" and rsi > profile.rsi_short_max))
+    higher_timeframe = int((direction == "LONG" and regime in ("TRENDING_DOWN", "TRANSITION")) or (direction == "SHORT" and regime in ("TRENDING_UP", "TRANSITION")))
+    components = {
+        "trend": trend,
+        "structure": structure_risk,
+        "momentum": momentum_risk,
+        "higher_timeframe": higher_timeframe,
+    }
+    return {"reversal_risk": sum(components.values()), "reversal_risk_components": components}
+
+
+def _breakout_flags(candles: list[dict[str, float]], direction: str, relative_volume: float, min_volume: float) -> tuple[bool, bool]:
+    if len(candles) < 16 or direction not in ("LONG", "SHORT"):
+        return False, False
+    prior = candles[-15:-2]
+    current = candles[-1]
+    prior_high = max(float(c["high"]) for c in prior)
+    prior_low = min(float(c["low"]) for c in prior)
+    if direction == "LONG":
+        breakout = float(current["close"]) > prior_high and relative_volume >= min_volume
+        retest = float(current["low"]) <= prior_high and float(current["close"]) > prior_high and float(current["close"]) >= float(current["open"])
+    else:
+        breakout = float(current["close"]) < prior_low and relative_volume >= min_volume
+        retest = float(current["high"]) >= prior_low and float(current["close"]) < prior_low and float(current["close"]) <= float(current["open"])
+    return breakout, retest
+
+
+def _overextension_metrics(candles: list[dict[str, float]], swings: list[dict[str, Any]], direction: str, current: float, atr: float) -> dict[str, Any]:
+    if atr <= 0 or direction not in ("LONG", "SHORT"):
+        return {}
+    if direction == "LONG":
+        levels = [float(point["price"]) for point in swings if point["kind"] == "high" and float(point["price"]) > current]
+        if not levels:
+            return {}
+        resistance = min(levels)
+        return {"nearest_resistance": round(resistance, 8), "room_to_resistance_atr": round((resistance - current) / atr, 4)}
+    levels = [float(point["price"]) for point in swings if point["kind"] == "low" and float(point["price"]) < current]
+    if not levels:
+        return {}
+    support = max(levels)
+    return {"nearest_support": round(support, 8), "room_to_support_atr": round((current - support) / atr, 4)}
+
+
 def _fmt(value: float) -> float:
     return round(float(value), 8)
 
@@ -96,19 +156,29 @@ def analyze(symbol: str, candles: list[dict[str, float]], interval: str = "15m",
         "calibration_note": profile.liquidity_note,
         "ready": False,
     }
-    if len(candles) < 30:
-        return {        **base, "signal": "NO TRADE", "bias": "NEUTRAL", "confidence": 0, "reason": "بيانات غير كافية"}
+    usable = closed_candles(candles, interval)
+    if len(usable) < 30:
+        return {
+            **base,
+            "signal": "NO TRADE",
+            "bias": "NEUTRAL",
+            "confidence": 0,
+            "reason": "لا توجد 30 شمعة مغلقة فعليًا على الأقل",
+            "signal_candle_time": iso_from_epoch(usable[-1].get("time")) if usable else None,
+            "signal_age_seconds": candle_age_seconds(usable[-1], interval) if usable else None,
+        }
 
-    closes = [float(c["close"]) for c in candles]
+    closes = [float(c["close"]) for c in usable]
     current = closes[-1]
-    atr = _atr(candles)
+    atr = _atr(usable)
     atr_pct = atr / max(current, 1e-9)
     rsi = _rsi(closes)
-    structure, swings = _swing_state(candles, profile.swing_lookback)
+    structure, swings = _swing_state(usable, profile.swing_lookback)
     regime = _regime(closes, atr, profile.low_volatility, profile.high_volatility)
     ema20, ema50 = _ema(closes, 20)[-1], _ema(closes, 50)[-1]
-    avg_vol = sum(float(c["volume"]) for c in candles[-20:]) / 20
-    rel_vol = float(candles[-1]["volume"]) / max(avg_vol, 1e-9)
+    drift = (closes[-1] - closes[-20]) / max(closes[-20], 1e-9)
+    avg_vol = sum(float(c["volume"]) for c in usable[-20:]) / 20
+    rel_vol = float(usable[-1]["volume"]) / max(avg_vol, 1e-9)
 
     direction = "LONG" if structure == "BULLISH" and ema20 >= ema50 else "SHORT" if structure == "BEARISH" and ema20 <= ema50 else "NEUTRAL"
     structure_score = 25 if structure != "NEUTRAL" else 10
@@ -132,6 +202,10 @@ def analyze(symbol: str, candles: list[dict[str, float]], interval: str = "15m",
     else:
         sl, tp1, tp2 = current - risk_buffer, current + risk_buffer * target_rr, current + risk_buffer * target_extension
     rr = abs(tp1 - entry) / max(abs(entry - sl), 1e-9)
+    breakout_confirmed, retest_confirmed = _breakout_flags(usable, direction, rel_vol, profile.min_relative_volume)
+    risk = _reversal_risk(direction, structure, regime, rsi, ema20, ema50, drift, profile)
+    overextension = _overextension_metrics(usable, swings, direction, current, atr)
+    last_candle = usable[-1]
 
     reasons = [f"ملف الأصل: {profile.label}"]
     if structure != "NEUTRAL":
@@ -157,6 +231,10 @@ def analyze(symbol: str, candles: list[dict[str, float]], interval: str = "15m",
     return {
         **base,
         "price": _fmt(current),
+        "signal_price": _fmt(current),
+        "signal_candle_time": iso_from_epoch(last_candle.get("time")),
+        "signal_age_seconds": candle_age_seconds(last_candle, interval),
+        "market_data_asof": iso_from_epoch(last_candle.get("time")),
         "regime": regime,
         "htf_trend": "BULLISH" if ema20 > ema50 else "BEARISH",
         "structure": structure,
@@ -173,6 +251,10 @@ def analyze(symbol: str, candles: list[dict[str, float]], interval: str = "15m",
         "take_profit_1": _fmt(tp1),
         "take_profit_2": _fmt(tp2),
         "rr": round(rr, 2),
+        "breakout_confirmed": breakout_confirmed,
+        "retest_confirmed": retest_confirmed,
+        **risk,
+        "overextension_metrics": overextension,
         "reasons": reasons,
         "ready": signal in ("LONG", "SHORT"),
         "updated_at": datetime.now(timezone.utc).isoformat(),

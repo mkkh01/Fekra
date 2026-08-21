@@ -5,6 +5,8 @@ from typing import Any
 import httpx
 import websockets
 
+from app.analysis.safety import closed_candles
+
 log = logging.getLogger("weeg.market")
 
 class MarketData:
@@ -36,15 +38,30 @@ class MarketData:
             stdout, stderr = await process.communicate()
             if process.returncode != 0: raise RuntimeError(stderr.decode(errors="ignore")[:240])
             rows = json.loads(stdout.decode())
-        result = [{"time": int(r[0] / 1000), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]), "closed": True} for r in rows]
+        now = time.time()
+        result = []
+        for r in rows:
+            candle = {"time": int(r[0] / 1000), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
+            candle["closed"] = candle["time"] + self._interval_seconds(interval) <= now
+            result.append(candle)
+        result = [candle for candle in result if candle["closed"]]
         self.candles[(symbol, interval)].clear(); self.candles[(symbol, interval)].extend(result)
         self.last_candle_at[(symbol, interval)] = time.time()
         if result and symbol not in self.tickers:
             self.tickers[symbol] = {"symbol": symbol, "price": result[-1]["close"], "change": 0.0, "volume": result[-1]["volume"], "updated_at": result[-1]["time"]}
         return result
 
+    @staticmethod
+    def _interval_seconds(interval: str) -> int:
+        units = {"m": 60, "h": 3600, "d": 86400}
+        value = str(interval).strip().lower()
+        try:
+            return int(value[:-1]) * units[value[-1]]
+        except (KeyError, TypeError, ValueError):
+            return 900
+
     async def ensure_history(self, symbol: str, interval: str) -> list[dict[str, Any]]:
-        cached = list(self.candles[(symbol, interval)])
+        cached = closed_candles(list(self.candles[(symbol, interval)]), interval)
         updated_at = self.last_candle_at.get((symbol, interval), 0.0)
         cache_fresh = updated_at > 0 and time.time() - updated_at < 90
         return cached if len(cached) >= 30 and cache_fresh else await self.load_history(symbol, interval)

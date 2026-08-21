@@ -15,6 +15,10 @@ class Store:
         "status", "result", "pnl", "max_favorable_excursion", "max_adverse_excursion",
         "exit_reason", "exit_price", "created_at", "closed_at", "source", "auto_created", "asset_profile",
         "signal_reasons", "mtf_alignment", "mtf_vetoes", "mtf_timeframes",
+        "signal_candle_time", "signal_age_seconds", "market_data_asof", "signal_price",
+        "entry_deviation_pct", "monitor_entry_limit_pct", "expected_rr_after_execution",
+        "reversal_risk", "reversal_risk_components", "overextension_metrics",
+        "exit_checked_at", "stop_moved_to_breakeven",
     }
     PG_UPDATE_FIELDS = PG_TRADE_FIELDS - {"id", "created_at"}
 
@@ -76,6 +80,7 @@ class Store:
             db.execute("create table if not exists trades (id text primary key, payload text not null, status text not null, created_at text not null)")
             db.execute("create table if not exists settings (id integer primary key check(id=1), payload text not null)")
             db.execute("create table if not exists push_subscriptions (endpoint text primary key, p256dh text not null, auth text not null, expiration_time real, user_agent text, created_at text not null, updated_at text not null)")
+            db.execute("create table if not exists shadow_signals (id text primary key, payload text not null, created_at text not null)")
             db.commit()
 
     async def _pg_query(self, query: str, params: tuple | list = (), fetch: str = "all"):
@@ -292,6 +297,38 @@ class Store:
             db.commit()
             return cursor.rowcount > 0
 
+    async def find_auto_trade_signal(self, symbol: str, timeframe: str, signal_candle_time: str | None) -> dict[str, Any] | None:
+        if not signal_candle_time:
+            return None
+        if self.database_url:
+            query = """
+                select * from public.weeg_trades
+                where symbol = %s and timeframe = %s and auto_created = true
+                  and signal_candle_time = %s
+                order by created_at desc limit 1
+            """
+            try:
+                return await self._pg_query(query, (symbol.upper(), timeframe, signal_candle_time), fetch="one")
+            except Exception:
+                if self.persistent_storage_ready and self.storage_key_source == "postgres":
+                    raise
+        try:
+            remote = await self._supabase("weeg_trades", params={
+                "select": "*", "symbol": f"eq.{symbol.upper()}", "timeframe": f"eq.{timeframe}",
+                "auto_created": "eq.true", "signal_candle_time": f"eq.{signal_candle_time}",
+                "order": "created_at.desc", "limit": "1",
+            })
+            if remote:
+                return remote[0]
+        except Exception:
+            pass
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute(
+                "select payload from trades where json_extract(payload, '$.symbol')=? and json_extract(payload, '$.timeframe')=? and json_extract(payload, '$.auto_created')=1 and json_extract(payload, '$.signal_candle_time')=? order by created_at desc limit 1",
+                (symbol.upper(), timeframe, signal_candle_time),
+            ).fetchone()
+            return json.loads(row[0]) if row else None
+
     async def find_open_auto_trade(self, symbol: str, timeframe: str) -> dict[str, Any] | None:
         if self.database_url:
             query = """
@@ -340,13 +377,82 @@ class Store:
 
     @staticmethod
     def _pg_value(field: str, value: Any) -> Any:
-        if field in {"signal_reasons", "mtf_vetoes", "mtf_timeframes"}:
+        if field in {"signal_reasons", "mtf_vetoes", "mtf_timeframes", "reversal_risk_components", "overextension_metrics", "blocked_reasons", "warning_reasons"}:
             try:
                 from psycopg.types.json import Jsonb
                 return Jsonb(value if value is not None else [])
             except ImportError:
                 return json.dumps(value if value is not None else [])
         return value
+
+    async def create_shadow_signal(self, signal: dict[str, Any]) -> dict[str, Any]:
+        data = dict(signal)
+        json_fields = {"reversal_risk_components", "overextension_metrics", "blocked_reasons", "warning_reasons"}
+        if self.database_url:
+            fields = [
+                "id", "user_id", "symbol", "timeframe", "direction", "decision_time", "signal_candle_time",
+                "signal_age_seconds", "market_data_asof", "signal_price", "simulated_entry_price",
+                "simulated_stop_loss", "simulated_take_profit_1", "simulated_take_profit_2",
+                "entry_deviation_pct", "monitor_entry_limit_pct", "expected_rr_after_execution", "regime",
+                "mtf_alignment", "reversal_risk", "reversal_risk_components", "overextension_metrics",
+                "would_have_executed", "would_block", "blocked_reasons", "warning_reasons", "outcome_status",
+            ]
+            values = [self._pg_value(field, data.get(field)) if field in json_fields else data.get(field) for field in fields]
+            placeholders = ", ".join(["%s"] * len(fields))
+            query = f"insert into public.weeg_shadow_signals ({', '.join(fields)}) values ({placeholders}) on conflict (symbol, timeframe, signal_candle_time) do update set decision_time = excluded.decision_time, signal_price = excluded.signal_price, simulated_entry_price = excluded.simulated_entry_price, simulated_stop_loss = excluded.simulated_stop_loss, simulated_take_profit_1 = excluded.simulated_take_profit_1, simulated_take_profit_2 = excluded.simulated_take_profit_2, entry_deviation_pct = excluded.entry_deviation_pct, monitor_entry_limit_pct = excluded.monitor_entry_limit_pct, expected_rr_after_execution = excluded.expected_rr_after_execution, regime = excluded.regime, mtf_alignment = excluded.mtf_alignment, reversal_risk = excluded.reversal_risk, reversal_risk_components = excluded.reversal_risk_components, overextension_metrics = excluded.overextension_metrics, would_have_executed = excluded.would_have_executed, would_block = excluded.would_block, blocked_reasons = excluded.blocked_reasons, warning_reasons = excluded.warning_reasons returning *"
+            return await self._pg_query(query, values, fetch="one")
+        if self.persistent_storage_configured:
+            try:
+                remote = await self._supabase("weeg_shadow_signals", method="POST", params={"on_conflict": "symbol,timeframe,signal_candle_time"}, data=data)
+                if remote:
+                    return remote[0]
+            except Exception:
+                pass
+        now = datetime.now(timezone.utc).isoformat()
+        data.setdefault("created_at", now)
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("insert or replace into shadow_signals(id,payload,created_at) values(?,?,?)", (str(data["id"]), json.dumps(data), data["created_at"]))
+            db.commit()
+        return data
+
+    async def update_shadow_signal(self, signal_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        allowed = {"outcome_status", "outcome_pnl", "outcome_checked_at"}
+        data = {key: value for key, value in patch.items() if key in allowed}
+        if not data:
+            return None
+        if self.database_url:
+            assignments = ", ".join([f"{field} = %s" for field in data])
+            values = list(data.values()) + [signal_id]
+            return await self._pg_query(f"update public.weeg_shadow_signals set {assignments} where id = %s returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            try:
+                remote = await self._supabase("weeg_shadow_signals", method="PATCH", params={"id": f"eq.{signal_id}"}, data=data)
+                return remote[0] if remote else None
+            except Exception:
+                pass
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select payload from shadow_signals where id=?", (signal_id,)).fetchone()
+            if not row:
+                return None
+            current = {**json.loads(row[0]), **data}
+            db.execute("update shadow_signals set payload=? where id=?", (json.dumps(current), signal_id))
+            db.commit()
+            return current
+
+    async def list_shadow_signals(self, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if self.database_url:
+            return await self._pg_query("select * from public.weeg_shadow_signals order by decision_time desc limit %s", (limit,))
+        if self.persistent_storage_configured:
+            try:
+                remote = await self._supabase("weeg_shadow_signals", params={"select": "*", "order": "decision_time.desc", "limit": str(limit)})
+                if remote is not None:
+                    return remote
+            except Exception:
+                pass
+        with sqlite3.connect(self.db_path) as db:
+            rows = db.execute("select payload from shadow_signals order by created_at desc limit ?", (limit,)).fetchall()
+            return [json.loads(row[0]) for row in rows]
 
     async def create_trade(self, trade: dict[str, Any]) -> dict[str, Any]:
         trade = {**trade, "created_at": datetime.now(timezone.utc).isoformat()}

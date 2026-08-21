@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     vapid_subject: str = "mailto:weeg-notifications@example.com"
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    weeg_shadow_mode: bool = True
+    weeg_safety_gates_enabled: bool = False
+    weeg_mfe_shadow: bool = True
+    signal_max_age_seconds: int = 900
+    mtf_sync_tolerance_seconds: int = 120
 
     @property
     def postgres_dsn(self) -> str | None:

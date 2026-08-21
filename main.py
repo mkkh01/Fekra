@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.data.market import MarketData
 from app.analysis.engine import analyze
+from app.analysis.safety import assess_entry, candle_age_seconds, closed_candles, iso_from_epoch
 from app.analysis.backtest import run_backtest
 from app.storage.store import Store
 from app.notifications import PushNotifier
@@ -40,6 +41,10 @@ cycle_state = {
     "completed_cycles": 0,
     "run_id": 0,
     "last_run_duration_seconds": None,
+    "shadow_signals": 0,
+    "shadow_blocked": 0,
+    "shadow_warnings": 0,
+    "shadow_outcome_updates": 0,
 }
 telegram_bot = TelegramBotController(telegram_notifier, store, market, settings, cycle_state)
 
@@ -81,12 +86,31 @@ def _opposite(direction: str) -> str:
     return "SHORT" if direction == "LONG" else "LONG"
 
 
+def _latest_closed_time(rows: list[dict], interval: str) -> float | None:
+    rows = closed_candles(rows, interval)
+    return float(rows[-1]["time"]) if rows else None
+
+
+def _mtf_data_veto(rows_by_interval: dict[str, list[dict]]) -> list[str]:
+    latest = {interval: _latest_closed_time(rows, interval) for interval, rows in rows_by_interval.items()}
+    if any(value is None for value in latest.values()):
+        return [f"لا توجد شمعة مغلقة فعليًا في {interval}" for interval, value in latest.items() if value is None]
+    entry_time = latest["15m"]
+    vetoes = []
+    for interval in ("1h", "4h"):
+        if latest[interval] > entry_time + settings.mtf_sync_tolerance_seconds:
+            vetoes.append(f"بيانات {interval} أحدث من شمعة 15m المستخدمة")
+    return vetoes
+
+
 async def _analyze_mtf(symbol: str) -> dict:
     rows_4h, rows_1h, rows_15m = await asyncio.gather(
         market.ensure_history(symbol, "4h"),
         market.ensure_history(symbol, "1h"),
         market.ensure_history(symbol, "15m"),
     )
+    rows_by_interval = {"4h": rows_4h, "1h": rows_1h, "15m": rows_15m}
+    data_vetoes = _mtf_data_veto(rows_by_interval) if any(rows_by_interval.values()) else []
     results = {
         "4h": analyze(symbol, rows_4h, "4h", settings.confidence_threshold, settings.minimum_rr),
         "1h": analyze(symbol, rows_1h, "1h", settings.confidence_threshold, settings.minimum_rr),
@@ -96,7 +120,7 @@ async def _analyze_mtf(symbol: str) -> dict:
     entry_signal = entry.get("signal")
     timeframe_signals = {interval: results[interval].get("signal") for interval in MTF_INTERVALS}
     timeframe_ready = {interval: bool(results[interval].get("ready")) for interval in MTF_INTERVALS}
-    vetoes = []
+    vetoes = [*data_vetoes]
     if entry_signal not in ("LONG", "SHORT"):
         vetoes.append("إشارة 15m ليست LONG أو SHORT")
     else:
@@ -108,14 +132,15 @@ async def _analyze_mtf(symbol: str) -> dict:
                 vetoes.append(f"الفريم {interval} غير جاهز")
 
     fully_aligned = (
-        entry_signal in ("LONG", "SHORT")
+        not data_vetoes
+        and entry_signal in ("LONG", "SHORT")
         and all(timeframe_signals[interval] == entry_signal for interval in MTF_INTERVALS)
         and all(timeframe_ready.values())
     )
     entry = {
         **entry,
         "timeframes": {
-            interval: {key: result.get(key) for key in ("signal", "bias", "confidence", "structure", "regime", "ready")}
+            interval: {key: result.get(key) for key in ("signal", "bias", "confidence", "structure", "regime", "ready", "signal_candle_time", "signal_age_seconds")}
             for interval, result in results.items()
         },
         "mtf_alignment": "ALIGNED" if fully_aligned else "VETO",
@@ -132,19 +157,119 @@ async def _analyze_mtf(symbol: str) -> dict:
     return entry
 
 
+async def _record_shadow_signal(symbol: str, result: dict, live_entry: float | None, safety: Any | None, extra_blocks: list[str] | None = None) -> dict:
+    extra_blocks = list(extra_blocks or [])
+    signal_candle_time = result.get("signal_candle_time") or iso_from_epoch(result.get("signal_time"))
+    if not signal_candle_time:
+        signal_candle_time = datetime.now(timezone.utc).isoformat()
+    blocked_reasons = [*(safety.blocked_reasons if safety else []), *extra_blocks]
+    warning_reasons = list(safety.warning_reasons if safety else [])
+    if extra_blocks and "STALE_SIGNAL" in extra_blocks:
+        warning_reasons.append("SIGNAL_AGE_ABOVE_MAXIMUM")
+    row = {
+        "id": str(uuid.uuid4()),
+        "symbol": symbol,
+        "timeframe": settings.default_interval,
+        "direction": result.get("signal"),
+        "decision_time": datetime.now(timezone.utc).isoformat(),
+        "signal_candle_time": signal_candle_time,
+        "signal_age_seconds": result.get("signal_age_seconds"),
+        "market_data_asof": result.get("market_data_asof"),
+        "signal_price": result.get("signal_price") or result.get("price") or result.get("entry"),
+        "simulated_entry_price": safety.entry_price if safety else live_entry,
+        "simulated_stop_loss": safety.stop_loss if safety else result.get("stop_loss"),
+        "simulated_take_profit_1": safety.take_profit_1 if safety else result.get("take_profit_1"),
+        "simulated_take_profit_2": safety.take_profit_2 if safety else result.get("take_profit_2"),
+        "entry_deviation_pct": safety.entry_deviation_pct if safety else None,
+        "monitor_entry_limit_pct": safety.monitor_limit if safety else None,
+        "expected_rr_after_execution": safety.expected_rr_after_execution if safety else None,
+        "regime": result.get("regime"),
+        "mtf_alignment": result.get("mtf_alignment"),
+        "reversal_risk": result.get("reversal_risk", 0),
+        "reversal_risk_components": result.get("reversal_risk_components", {}),
+        "overextension_metrics": result.get("overextension_metrics", {}),
+        "would_have_executed": not blocked_reasons,
+        "would_block": bool(blocked_reasons),
+        "blocked_reasons": blocked_reasons,
+        "warning_reasons": warning_reasons,
+        "outcome_status": "PENDING",
+    }
+    saved = await store.create_shadow_signal(row)
+    cycle_state["shadow_signals"] += 1
+    if saved.get("would_block"):
+        cycle_state["shadow_blocked"] += 1
+    if saved.get("warning_reasons"):
+        cycle_state["shadow_warnings"] += 1
+    return saved
+
+
+async def _evaluate_shadow_outcomes() -> int:
+    updated_count = 0
+    try:
+        pending = [row for row in await store.list_shadow_signals(200) if (row.get("outcome_status") or "PENDING") == "PENDING"]
+    except Exception as exc:
+        log.warning("shadow outcome scan failed: %s", exc)
+        return 0
+    for row in pending:
+        symbol = str(row.get("symbol") or "").upper()
+        price = (market.tickers.get(symbol) or {}).get("price")
+        if not symbol or price is None or not row.get("direction"):
+            continue
+        simulated = {
+            "direction": row.get("direction"),
+            "entry": row.get("simulated_entry_price"),
+            "stop_loss": row.get("simulated_stop_loss"),
+            "take_profit_1": row.get("simulated_take_profit_1"),
+        }
+        patch = evaluate_trade_exit(simulated, float(price))
+        if not patch:
+            continue
+        outcome = await store.update_shadow_signal(str(row["id"]), {
+            "outcome_status": "LOSS" if patch["result"] == "LOSS" else "WIN",
+            "outcome_pnl": patch["pnl"],
+            "outcome_checked_at": datetime.now(timezone.utc).isoformat(),
+        })
+        if outcome:
+            updated_count += 1
+    cycle_state["shadow_outcome_updates"] += updated_count
+    return updated_count
+
+
 async def _scan_and_store_auto_signals() -> list[dict]:
     saved = []
     ready_signals = 0
     for symbol in settings.symbol_list:
         try:
             result = await _analyze_mtf(symbol)
-            if not result.get("ready") or result.get("signal") not in ("LONG", "SHORT"):
+            actual_ready = bool(result.get("ready") and result.get("signal") in ("LONG", "SHORT"))
+            candidate_direction = result.get("signal") if actual_ready else result.get("bias")
+            live_entry = (market.tickers.get(symbol) or {}).get("price")
+            extra_blocks = [] if actual_ready else ["BASE_SIGNAL_NOT_READY"]
+            age = result.get("signal_age_seconds")
+            if age is not None and float(age) > settings.signal_max_age_seconds:
+                extra_blocks.append("STALE_SIGNAL")
+            if live_entry is None:
+                extra_blocks.append("MISSING_LIVE_TICKER")
+            safety = None
+            candidate = {**result, "signal": candidate_direction} if candidate_direction in ("LONG", "SHORT") else result
+            if live_entry is not None and candidate_direction in ("LONG", "SHORT"):
+                safety = assess_entry(candidate, float(live_entry), result.get("applied_minimum_rr", settings.minimum_rr))
+            if settings.weeg_shadow_mode and candidate_direction in ("LONG", "SHORT"):
+                await _record_shadow_signal(symbol, candidate, live_entry, safety, extra_blocks)
+            if not actual_ready:
                 continue
             ready_signals += 1
             cycle_state["ready_signals"] = ready_signals
             cycle_state["ready_symbols"].append(symbol)
+            if extra_blocks or (safety and safety.would_block and settings.weeg_safety_gates_enabled):
+                continue
             existing = await store.find_open_auto_trade(symbol, settings.default_interval)
             if existing:
+                continue
+            same_signal = await store.find_auto_trade_signal(symbol, settings.default_interval, result.get("signal_candle_time"))
+            if same_signal:
+                continue
+            if safety is None:
                 continue
             trade = {
                 "id": str(uuid.uuid4()),
@@ -152,17 +277,27 @@ async def _scan_and_store_auto_signals() -> list[dict]:
                 "direction": result["signal"],
                 "timeframe": settings.default_interval,
                 "signal_time": result.get("updated_at") or datetime.now(timezone.utc).isoformat(),
-                "entry": result["entry"],
-                "stop_loss": result["stop_loss"],
-                "take_profit_1": result["take_profit_1"],
-                "take_profit_2": result["take_profit_2"],
-                "risk_reward": result["rr"],
+                "signal_candle_time": result.get("signal_candle_time"),
+                "signal_age_seconds": result.get("signal_age_seconds"),
+                "market_data_asof": result.get("market_data_asof"),
+                "signal_price": safety.signal_price,
+                "entry": safety.entry_price,
+                "entry_deviation_pct": safety.entry_deviation_pct,
+                "monitor_entry_limit_pct": safety.monitor_limit,
+                "expected_rr_after_execution": safety.expected_rr_after_execution,
+                "stop_loss": safety.stop_loss,
+                "take_profit_1": safety.take_profit_1,
+                "take_profit_2": safety.take_profit_2,
+                "risk_reward": safety.expected_rr_after_execution,
                 "confidence": result["confidence"],
                 "regime": result["regime"],
                 "structure_state": result.get("structure"),
                 "liquidity_state": result.get("liquidity"),
                 "volume_state": result.get("volume"),
                 "momentum_state": result.get("momentum"),
+                "reversal_risk": safety.reversal_risk,
+                "reversal_risk_components": safety.reversal_risk_components,
+                "overextension_metrics": safety.overextension_metrics,
                 "status": "OPEN",
                 "source": "auto_signal",
                 "auto_created": True,
@@ -232,6 +367,7 @@ async def _auto_signal_loop():
             if store.has_persistent_storage:
                 cycle_state["scanned_symbols"] = len(settings.symbol_list)
                 saved = await _scan_and_store_auto_signals()
+                await _evaluate_shadow_outcomes()
                 cycle_state["saved_trades"] = len(saved)
                 cycle_state["last_saved_symbols"] = [trade.get("symbol") for trade in saved]
                 cycle_state["completed_cycles"] += 1
@@ -256,6 +392,42 @@ async def _auto_signal_loop():
         cycle_state["last_run_duration_seconds"] = round((cycle_finished - cycle_started).total_seconds(), 3)
         cycle_state["next_run_at"] = (cycle_finished.timestamp() + delay)
         await asyncio.sleep(delay)
+
+
+trade_tracking: dict[str, dict[str, Any]] = {}
+
+
+def _excursion_patch(trade: dict, current_price: float, force: bool = False) -> dict[str, Any]:
+    trade_id = str(trade.get("id"))
+    try:
+        entry = float(trade["entry"])
+        stop_loss = float(trade["stop_loss"])
+        current = float(current_price)
+    except (KeyError, TypeError, ValueError):
+        return {}
+    if entry == 0:
+        return {}
+    direction = str(trade.get("direction") or "").upper()
+    move_pct = ((current - entry) / abs(entry) * 100) if direction == "LONG" else ((entry - current) / abs(entry) * 100) if direction == "SHORT" else 0.0
+    risk = abs(entry - stop_loss)
+    favorable_distance = (current - entry) if direction == "LONG" else (entry - current) if direction == "SHORT" else 0.0
+    state = trade_tracking.setdefault(trade_id, {"mfe": float(trade.get("max_favorable_excursion") or 0.0), "mae": float(trade.get("max_adverse_excursion") or 0.0), "last_persist": 0.0, "plus_one_r_logged": False})
+    new_record = move_pct > state["mfe"] or move_pct < state["mae"]
+    state["mfe"] = max(state["mfe"], move_pct)
+    state["mae"] = min(state["mae"], move_pct)
+    now = datetime.now(timezone.utc).timestamp()
+    plus_one_r = risk > 0 and favorable_distance >= risk
+    if plus_one_r and not state["plus_one_r_logged"]:
+        state["plus_one_r_logged"] = True
+        log.info("shadow +1R candidate reached for trade %s; no production stop move applied", trade_id)
+    if not force and now - state["last_persist"] < 45:
+        return {}
+    state["last_persist"] = now
+    return {
+        "max_favorable_excursion": round(state["mfe"], 8),
+        "max_adverse_excursion": round(state["mae"], 8),
+        "exit_checked_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def evaluate_trade_exit(trade: dict, current_price: float) -> dict | None:
@@ -288,6 +460,8 @@ def evaluate_trade_exit(trade: dict, current_price: float) -> dict | None:
         "pnl": round(gross_pnl, 8),
         "exit_reason": reason,
         "exit_price": round(current, 8),
+        "exit_checked_at": datetime.now(timezone.utc).isoformat(),
+        "stop_moved_to_breakeven": False,
         "closed_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -300,14 +474,19 @@ async def _manage_open_trades():
                 price = market.tickers.get(symbol, {}).get("price")
                 if not symbol or price is None:
                     continue
-                patch = evaluate_trade_exit(trade, price)
+                exit_patch = evaluate_trade_exit(trade, price)
+                excursion = _excursion_patch(trade, price, force=bool(exit_patch)) if settings.weeg_mfe_shadow else {}
+                patch = {**excursion, **exit_patch} if exit_patch else excursion
                 if not patch:
                     continue
                 updated = await store.update_trade(str(trade["id"]), patch)
-                if updated:
-                    log.info("trade %s closed at %s: %s price=%s", trade.get("id"), symbol, patch["exit_reason"], price)
+                if updated and exit_patch:
+                    log.info("trade %s closed at %s: %s price=%s", trade.get("id"), symbol, exit_patch["exit_reason"], price)
+                    trade_tracking.pop(str(trade["id"]), None)
                     asyncio.create_task(_notify_trade_closed(updated))
                     asyncio.create_task(_notify_telegram_trade_closed(updated))
+                elif updated:
+                    log.debug("trade %s excursion telemetry updated at price=%s", trade.get("id"), price)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -395,6 +574,9 @@ async def health(response: Response):
         "telegram_controls_enabled": telegram_bot.configured,
         "auto_signal_enabled": persistent,
         "auto_signal_storage": persistent,
+        "shadow_mode": settings.weeg_shadow_mode,
+        "safety_gates_enabled": settings.weeg_safety_gates_enabled,
+        "mfe_shadow": settings.weeg_mfe_shadow,
         "warning": None if persistent else "التخزين الدائم غير جاهز؛ الفحص الآلي ينتظر اتصال Supabase ولن يحفظ صفقات في SQLite المؤقت",
     }
 
@@ -412,6 +594,26 @@ async def summary_cycle_state(response: Response):
             "storage_last_error": store.storage_last_error,
         },
     }
+
+@app.get("/api/summary/shadow")
+async def summary_shadow(limit: int = 200):
+    rows = await store.list_shadow_signals(limit=min(max(limit, 1), 500))
+    blocked = [row for row in rows if row.get("would_block")]
+    warnings = [row for row in rows if row.get("warning_reasons")]
+    outcomes = {}
+    for row in rows:
+        outcome = row.get("outcome_status") or "PENDING"
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+    return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "sample_size": len(rows),
+        "blocked_count": len(blocked),
+        "warning_count": len(warnings),
+        "blocked_rate_pct": round(len(blocked) / len(rows) * 100, 3) if rows else 0,
+        "outcomes": outcomes,
+        "recent": rows[:min(limit, 50)],
+    }
+
 
 @app.get("/api/summary/cycle")
 async def summary_cycle(response: Response):
