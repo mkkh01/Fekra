@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weeg | Crypto Intelligence</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css?v=7" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <meta name="theme-color" content="#08131d" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">W</span><div><strong>WEEG</strong><small>Market Intelligence</small></div></div>
+    <div class="live-pill"><i></i> بيانات عند الطلب <span id="last-update">—</span></div>
+    <div class="top-actions"><button class="ghost" id="refresh-btn">تحديث</button><button class="ghost" id="push-btn" type="button">تفعيل إشعارات الهاتف</button><button class="primary" id="settings-btn">الإعدادات</button></div>
+  </header>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <div class="sidebar-head"><div><span class="eyebrow">WATCHLIST</span><h2>قائمة المتابعة</h2></div><button class="icon-btn" id="add-symbol">＋</button></div>
+      <div class="search-wrap"><span>⌕</span><input id="symbol-search" placeholder="ابحث عن عملة..." /></div>
+      <div class="watchlist" id="watchlist"></div>
+      <div class="side-footer"><span>لا يوجد بث تلقائي</span><span class="connection-dot" id="connection-dot"></span></div>
+    </aside>
+    <section class="workspace">
+      <div class="instrument-bar"><div><span class="eyebrow">MARKET / USDT</span><div class="instrument-title"><h1 id="active-symbol">BTCUSDT</h1><div class="mobile-symbol-picker" id="mobile-symbol-picker"><button type="button" class="mobile-symbol-trigger" id="mobile-symbol-trigger" aria-haspopup="listbox" aria-expanded="false"><span id="mobile-symbol-label">BTCUSDT</span><span class="picker-chevron">⌄</span></button><div class="mobile-symbol-menu" id="mobile-symbol-menu" role="listbox" hidden></div></div><span id="active-signal" class="signal-badge neutral">NO TRADE</span></div></div><div class="timeframes" id="timeframes"><button data-interval="15m" class="selected">15د</button><button data-interval="1h">1س</button><button data-interval="4h">4س</button></div><div class="on-demand-actions"><button id="price-btn" class="ghost">السعر الحالي</button><button id="cycle-refresh-btn" class="ghost">Summary Cycle</button><button id="system-refresh-btn" class="ghost">أداء النظام</button></div></div>
+      <div class="price-strip"><div><span>السعر الحالي</span><strong id="active-price">—</strong></div><div><span>التغير</span><strong id="active-change">—</strong></div><div><span>النظام</span><strong id="active-regime">—</strong></div><div><span>الثقة</span><strong id="active-confidence">—</strong></div><div><span>R:R</span><strong id="active-rr">—</strong></div></div>
+      <section class="cycle-summary panel" id="cycle-summary"><div class="panel-head"><div><span class="eyebrow">SYSTEM MONITOR</span><h3>ملخص دورة التشغيل</h3></div><span class="cycle-status neutral" id="cycle-status">جارٍ الفحص</span></div><div class="cycle-grid"><div><span>حالة التخزين</span><strong id="cycle-storage">—</strong></div><div><span>البحث الآلي</span><strong id="cycle-auto">—</strong></div><div><span>العملات المفحوصة</span><strong id="cycle-scanned">—</strong></div><div><span>إشارات جاهزة</span><strong id="cycle-ready">—</strong></div><div><span>صفقات مفتوحة</span><strong id="cycle-open">—</strong></div><div><span>صفقات مغلقة</span><strong id="cycle-closed">—</strong></div><div><span>الدورات المكتملة</span><strong id="cycle-count">—</strong></div><div><span>آخر حفظ</span><strong id="cycle-saved">—</strong></div><div><span>الدورة التالية</span><strong id="cycle-next">—</strong></div></div><div class="cycle-note" id="cycle-note">—</div></section>
+      <section class="on-demand-panel panel"><div class="panel-head"><div><span class="eyebrow">ON DEMAND</span><h3>بيانات عند الطلب</h3></div><span class="cycle-status neutral">لا يوجد بث حي</span></div><div class="on-demand-copy">يتم جلب البيانات فقط عند الضغط على الزر المطلوب. إشعارات فتح وإغلاق الصفقات تصل عبر Telegram.</div></section>
+      <section class="bottom-grid"><div class="panel signal-panel"><div class="panel-head"><div><span class="eyebrow">AI CONFLUENCE</span><h3>ملخص الإشارة</h3></div><button class="details-btn" id="explain-btn">التفاصيل</button></div><div id="signal-content" class="signal-content"></div></div><div class="panel trades-panel"><div class="panel-head"><div><span class="eyebrow">PAPER JOURNAL</span><h3>الصفقات</h3></div><div class="trade-tabs"><button id="load-open-btn" class="active" data-status="open">الصفقات المفتوحة</button><button id="load-closed-btn" data-status="closed">الصفقات المغلقة</button></div></div><div class="trade-table-wrap"><table><thead><tr><th>العملة</th><th>النوع</th><th>الدخول</th><th>الوقف</th><th>الهدف</th><th>سعر الخروج</th><th>وقت الخروج</th><th>الحالة</th><th>النتيجة</th></tr></thead><tbody id="trades-body"></tbody></table></div></div></section>
+    </section>
+  </main>
+  <div id="toast" class="toast"></div>
+  <script src="/static/app.js?v=13"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "Weeg Trading Dashboard",
+  "short_name": "Weeg",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#08131d",
+  "theme_color": "#08131d",
+  "lang": "ar",
+  "dir": "rtl",
+  "icons": [
+    { "src": "/static/weeg-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: weeg-trading-dashboard
+    runtime: python
+    buildCommand: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+    startCommand: venv/bin/python main.py
+    healthCheckPath: /api/health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        value: https://ymjancsrnmunkyaomdsx.supabase.co
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_KEY
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: SYMBOLS
+        value: BTCUSDT,ETHUSDT,LTCUSDT,XRPUSDT,ADAUSDT,SOLUSDT,DOTUSDT,LINKUSDT,AVAXUSDT,BNBUSDT,TRXUSDT,BCHUSDT,UNIUSDT,ETCUSDT,ATOMUSDT,XLMUSDT,NEARUSDT,FILUSDT,APTUSDT,ARBUSDT
+      - key: DEFAULT_INTERVAL
+        value: 15m
+      - key: CORS_ORIGINS
+        value: '*'
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: VAPID_SUBJECT
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
