@@ -10,7 +10,7 @@ DEFAULT_SYMBOLS = [
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
-    supabase_url: str | None = "https://ymjancsrnmunkyaomdsx.supabase.co"
+    supabase_url: str | None = "https://obljtphynhmbcbyxyrjg.supabase.co"
     supabase_key: str | None = None
     supabase_service_role_key: str | None = None
     supabase_anon_key: str | None = None
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     def supabase_http_url(self) -> str:
         if self.supabase_url and self.supabase_url.lower().startswith(("http://", "https://")):
             return self.supabase_url
-        return "https://ymjancsrnmunkyaomdsx.supabase.co"
+        return "https://obljtphynhmbcbyxyrjg.supabase.co"
 
     @property
     def supabase_auth_keys(self) -> list[str]:
