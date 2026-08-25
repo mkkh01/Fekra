@@ -4,7 +4,7 @@ services:
     runtime: python
     buildCommand: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
     startCommand: venv/bin/python main.py
-    healthCheckPath: /api/health
+    healthCheckPath: /api/healthz
     envVars:
       - key: DATABASE_URL
         sync: false
@@ -12,7 +12,7 @@ services:
         value: https://obljtphynhmbcbyxyrjg.supabase.co
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
-      - key: SUPABASE_KEY
+      - key: SUPABASE_PUBLISHABLE_KEY
         sync: false
       - key: REDIS_URL
         sync: false
@@ -21,7 +21,7 @@ services:
       - key: DEFAULT_INTERVAL
         value: 15m
       - key: CORS_ORIGINS
-        value: '*'
+        sync: false
       - key: VAPID_PRIVATE_KEY
         sync: false
       - key: VAPID_SUBJECT

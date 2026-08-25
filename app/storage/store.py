@@ -20,7 +20,10 @@ class Store:
         "reversal_risk", "reversal_risk_components", "overextension_metrics",
         "exit_checked_at", "stop_moved_to_breakeven",
     }
-    PG_UPDATE_FIELDS = PG_TRADE_FIELDS - {"id", "created_at"}
+    PG_UPDATE_FIELDS = {
+        "status", "result", "pnl", "max_favorable_excursion", "max_adverse_excursion",
+        "exit_reason", "exit_price", "closed_at", "exit_checked_at", "stop_moved_to_breakeven",
+    }
 
     def __init__(
         self,
@@ -79,7 +82,12 @@ class Store:
         with sqlite3.connect(self.db_path) as db:
             db.execute("create table if not exists trades (id text primary key, payload text not null, status text not null, created_at text not null)")
             db.execute("create table if not exists settings (id integer primary key check(id=1), payload text not null)")
-            db.execute("create table if not exists push_subscriptions (endpoint text primary key, p256dh text not null, auth text not null, expiration_time real, user_agent text, created_at text not null, updated_at text not null)")
+            db.execute("create table if not exists push_subscriptions (endpoint text primary key, p256dh text not null, auth text not null, expiration_time real, user_agent text, created_at text not null, updated_at text not null, user_id text)")
+            try:
+                db.execute("alter table push_subscriptions add column user_id text")
+            except sqlite3.OperationalError:
+                pass
+            db.execute("create table if not exists user_settings (user_id text primary key, payload text not null, updated_at text not null)")
             db.execute("create table if not exists shadow_signals (id text primary key, payload text not null, created_at text not null)")
             db.commit()
 
@@ -171,15 +179,21 @@ class Store:
         self.storage_last_error = ";".join(errors) or "persistent_storage_not_configured"
         return False
 
-    async def list_trades(self, status: str | None = None) -> list[dict[str, Any]]:
+    async def list_trades(self, status: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:
         if self.database_url:
             query = "select * from public.weeg_trades"
             params: list[Any] = []
+            conditions: list[str] = []
             if status == "CLOSED_OR_STOPPED":
-                query += " where status in ('CLOSED','STOPPED')"
+                conditions.append("status in ('CLOSED','STOPPED')")
             elif status:
-                query += " where status = %s"
+                conditions.append("status = %s")
                 params.append(status)
+            if user_id:
+                conditions.append("(user_id is null or user_id = %s)")
+                params.append(user_id)
+            if conditions:
+                query += " where " + " and ".join(conditions)
             query += " order by signal_time desc limit 200"
             try:
                 return self._decorate_trades(await self._pg_query(query, params))
@@ -192,51 +206,73 @@ class Store:
                 params["status"] = "in.(CLOSED,STOPPED)"
             elif status:
                 params["status"] = f"eq.{status}"
+            if user_id:
+                params["or"] = f"(user_id.is.null,user_id.eq.{user_id})"
             remote = await self._supabase("weeg_trades", params=params)
             if remote is not None:
                 return self._decorate_trades(remote)
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
             query = "select payload from trades"
             args = []
+            conditions = []
             if status == "CLOSED_OR_STOPPED":
-                query += " where status in ('CLOSED','STOPPED')"
+                conditions.append("status in ('CLOSED','STOPPED')")
             elif status:
-                query += " where status=?"
+                conditions.append("status=?")
                 args.append(status)
+            if user_id:
+                conditions.append("(json_extract(payload, '$.user_id') is null or json_extract(payload, '$.user_id')=?)")
+                args.append(user_id)
+            if conditions:
+                query += " where " + " and ".join(conditions)
             query += " order by created_at desc limit 200"
             return self._decorate_trades([json.loads(row[0]) for row in db.execute(query, args).fetchall()])
 
-    async def list_active_trades(self) -> list[dict[str, Any]]:
+    async def list_active_trades(self, user_id: str | None = None) -> list[dict[str, Any]]:
         if self.database_url:
-            query = "select * from public.weeg_trades where status in ('PENDING','OPEN','PARTIAL') order by created_at asc limit 500"
+            query = "select * from public.weeg_trades where status in ('PENDING','OPEN','PARTIAL')"
+            params: list[Any] = []
+            if user_id:
+                query += " and (user_id is null or user_id = %s)"
+                params.append(user_id)
+            query += " order by created_at asc limit 500"
             try:
-                return await self._pg_query(query)
+                return await self._pg_query(query, params)
             except Exception:
                 if self.persistent_storage_ready and self.storage_key_source == "postgres":
                     raise
         try:
-            remote = await self._supabase("weeg_trades", params={
+            params = {
                 "select": "*",
                 "status": "in.(PENDING,OPEN,PARTIAL)",
                 "order": "created_at.asc",
                 "limit": "500",
-            })
+            }
+            if user_id:
+                params["or"] = f"(user_id.is.null,user_id.eq.{user_id})"
+            remote = await self._supabase("weeg_trades", params=params)
             if remote is not None:
                 return remote
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
-            rows = db.execute("select payload from trades where status in ('PENDING','OPEN','PARTIAL') order by created_at asc limit 500").fetchall()
+            if user_id:
+                rows = db.execute("select payload from trades where status in ('PENDING','OPEN','PARTIAL') and (json_extract(payload, '$.user_id') is null or json_extract(payload, '$.user_id')=?) order by created_at asc limit 500", (user_id,)).fetchall()
+            else:
+                rows = db.execute("select payload from trades where status in ('PENDING','OPEN','PARTIAL') order by created_at asc limit 500").fetchall()
             return [json.loads(row[0]) for row in rows]
 
-    async def upsert_push_subscription(self, subscription: dict[str, Any]) -> dict[str, Any]:
+    async def upsert_push_subscription(self, subscription: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         data = {
             "endpoint": str(subscription["endpoint"]),
             "p256dh": str(subscription["p256dh"]),
             "auth": str(subscription["auth"]),
+            "user_id": user_id,
             "expiration_time": subscription.get("expiration_time"),
             "user_agent": subscription.get("user_agent"),
             "updated_at": now,
@@ -245,55 +281,75 @@ class Store:
         if self.database_url:
             query = """
                 insert into public.weeg_push_subscriptions
-                    (endpoint, p256dh, auth, expiration_time, user_agent, created_at, updated_at)
-                values (%s, %s, %s, %s, %s, %s, %s)
+                    (endpoint, p256dh, auth, user_id, expiration_time, user_agent, created_at, updated_at)
+                values (%s, %s, %s, %s, %s, %s, %s, %s)
                 on conflict (endpoint) do update set
                     p256dh = excluded.p256dh,
                     auth = excluded.auth,
                     expiration_time = excluded.expiration_time,
                     user_agent = excluded.user_agent,
+                    user_id = excluded.user_id,
                     updated_at = excluded.updated_at
                 returning *
             """
-            return await self._pg_query(query, tuple(data.values()), fetch="one")
+            return await self._pg_query(query, (data["endpoint"], data["p256dh"], data["auth"], data["user_id"], data["expiration_time"], data["user_agent"], data["created_at"], data["updated_at"]), fetch="one")
         if self.persistent_storage_configured:
             remote = await self._supabase("weeg_push_subscriptions", method="POST", params={"on_conflict": "endpoint"}, data=data)
             if remote:
                 return remote[0]
         with sqlite3.connect(self.db_path) as db:
             db.execute(
-                "insert or replace into push_subscriptions(endpoint,p256dh,auth,expiration_time,user_agent,created_at,updated_at) values(?,?,?,?,?,?,?)",
-                tuple(data.values()),
+                "insert or replace into push_subscriptions(endpoint,p256dh,auth,expiration_time,user_agent,created_at,updated_at,user_id) values(?,?,?,?,?,?,?,?)",
+                (data["endpoint"], data["p256dh"], data["auth"], data["expiration_time"], data["user_agent"], data["created_at"], data["updated_at"], data["user_id"]),
             )
             db.commit()
         return data
 
-    async def list_push_subscriptions(self) -> list[dict[str, Any]]:
+    async def list_push_subscriptions(self, user_id: str | None = None) -> list[dict[str, Any]]:
         if self.database_url:
+            if user_id:
+                return await self._pg_query("select endpoint, p256dh, auth, expiration_time, user_agent from public.weeg_push_subscriptions where user_id = %s order by updated_at desc limit 100", (user_id,))
             return await self._pg_query("select endpoint, p256dh, auth, expiration_time, user_agent from public.weeg_push_subscriptions order by updated_at desc limit 100")
         if self.persistent_storage_configured:
             try:
-                remote = await self._supabase("weeg_push_subscriptions", params={"select": "endpoint,p256dh,auth,expiration_time,user_agent", "order": "updated_at.desc", "limit": "100"})
+                params = {"select": "endpoint,p256dh,auth,expiration_time,user_agent", "order": "updated_at.desc", "limit": "100"}
+                if user_id:
+                    params["user_id"] = f"eq.{user_id}"
+                remote = await self._supabase("weeg_push_subscriptions", params=params)
                 if remote is not None:
                     return remote
             except Exception:
-                pass
+                if self.persistent_storage_configured:
+                    raise
         with sqlite3.connect(self.db_path) as db:
-            rows = db.execute("select endpoint,p256dh,auth,expiration_time,user_agent from push_subscriptions order by updated_at desc limit 100").fetchall()
+            if user_id:
+                rows = db.execute("select endpoint,p256dh,auth,expiration_time,user_agent from push_subscriptions where user_id=? order by updated_at desc limit 100", (user_id,)).fetchall()
+            else:
+                rows = db.execute("select endpoint,p256dh,auth,expiration_time,user_agent from push_subscriptions order by updated_at desc limit 100").fetchall()
             return [dict(zip(("endpoint", "p256dh", "auth", "expiration_time", "user_agent"), row)) for row in rows]
 
-    async def delete_push_subscription(self, endpoint: str) -> bool:
+    async def delete_push_subscription(self, endpoint: str, user_id: str | None = None) -> bool:
         if self.database_url:
-            row = await self._pg_query("delete from public.weeg_push_subscriptions where endpoint = %s returning endpoint", (endpoint,), fetch="one")
+            if user_id:
+                row = await self._pg_query("delete from public.weeg_push_subscriptions where endpoint = %s and user_id = %s returning endpoint", (endpoint, user_id), fetch="one")
+            else:
+                row = await self._pg_query("delete from public.weeg_push_subscriptions where endpoint = %s returning endpoint", (endpoint,), fetch="one")
             return bool(row)
         if self.persistent_storage_configured:
             try:
-                await self._supabase("weeg_push_subscriptions", method="DELETE", params={"endpoint": f"eq.{endpoint}"})
+                params = {"endpoint": f"eq.{endpoint}"}
+                if user_id:
+                    params["user_id"] = f"eq.{user_id}"
+                await self._supabase("weeg_push_subscriptions", method="DELETE", params=params)
                 return True
             except Exception:
-                pass
+                if self.persistent_storage_configured:
+                    raise
         with sqlite3.connect(self.db_path) as db:
-            cursor = db.execute("delete from push_subscriptions where endpoint=?", (endpoint,))
+            if user_id:
+                cursor = db.execute("delete from push_subscriptions where endpoint=? and user_id=?", (endpoint, user_id))
+            else:
+                cursor = db.execute("delete from push_subscriptions where endpoint=?", (endpoint,))
             db.commit()
             return cursor.rowcount > 0
 
@@ -321,7 +377,8 @@ class Store:
             if remote:
                 return remote[0]
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
             row = db.execute(
                 "select payload from trades where json_extract(payload, '$.symbol')=? and json_extract(payload, '$.timeframe')=? and json_extract(payload, '$.auto_created')=1 and json_extract(payload, '$.signal_candle_time')=? order by created_at desc limit 1",
@@ -351,7 +408,8 @@ class Store:
             if remote:
                 return remote[0]
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
             row = db.execute(
                 "select payload from trades where json_extract(payload, '$.symbol')=? and json_extract(payload, '$.timeframe')=? and json_extract(payload, '$.auto_created')=1 and status in ('PENDING','OPEN','PARTIAL') order by created_at desc limit 1",
@@ -407,7 +465,8 @@ class Store:
                 if remote:
                     return remote[0]
             except Exception:
-                pass
+                if self.persistent_storage_configured:
+                    raise
         now = datetime.now(timezone.utc).isoformat()
         data.setdefault("created_at", now)
         with sqlite3.connect(self.db_path) as db:
@@ -429,7 +488,8 @@ class Store:
                 remote = await self._supabase("weeg_shadow_signals", method="PATCH", params={"id": f"eq.{signal_id}"}, data=data)
                 return remote[0] if remote else None
             except Exception:
-                pass
+                if self.persistent_storage_configured:
+                    raise
         with sqlite3.connect(self.db_path) as db:
             row = db.execute("select payload from shadow_signals where id=?", (signal_id,)).fetchone()
             if not row:
@@ -449,7 +509,8 @@ class Store:
                 if remote is not None:
                     return remote
             except Exception:
-                pass
+                if self.persistent_storage_configured:
+                    raise
         with sqlite3.connect(self.db_path) as db:
             rows = db.execute("select payload from shadow_signals order by created_at desc limit ?", (limit,)).fetchall()
             return [json.loads(row[0]) for row in rows]
@@ -473,19 +534,29 @@ class Store:
             db.commit()
         return trade
 
-    async def update_trade(self, trade_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    async def update_trade(self, trade_id: str, patch: dict[str, Any], user_id: str | None = None) -> dict[str, Any] | None:
         data = {key: value for key, value in patch.items() if key in self.PG_UPDATE_FIELDS}
         if self.database_url:
             if not data:
-                return await self._pg_query("select * from public.weeg_trades where id = %s", (trade_id,), fetch="one")
+                return None
             assignments = ", ".join([f"{field} = %s" for field in data])
             values = [self._pg_value(field, data[field]) for field in data] + [trade_id]
-            return await self._pg_query(f"update public.weeg_trades set {assignments} where id = %s returning *", values, fetch="one")
+            where = "id = %s"
+            if user_id:
+                where += " and user_id = %s"
+                values.append(user_id)
+            return await self._pg_query(f"update public.weeg_trades set {assignments} where {where} returning *", values, fetch="one")
         if self.persistent_storage_configured:
-            remote = await self._supabase("weeg_trades", method="PATCH", params={"id": f"eq.{trade_id}"}, data=patch)
+            params = {"id": f"eq.{trade_id}"}
+            if user_id:
+                params["user_id"] = f"eq.{user_id}"
+            remote = await self._supabase("weeg_trades", method="PATCH", params=params, data=patch)
             return remote[0] if remote else None
         with sqlite3.connect(self.db_path) as db:
-            row = db.execute("select payload from trades where id=?", (trade_id,)).fetchone()
+            if user_id:
+                row = db.execute("select payload from trades where id=? and json_extract(payload, '$.user_id')=?", (trade_id, user_id)).fetchone()
+            else:
+                row = db.execute("select payload from trades where id=?", (trade_id,)).fetchone()
             if not row:
                 return None
             trade = {**json.loads(row[0]), **patch}
@@ -493,23 +564,33 @@ class Store:
             db.commit()
             return trade
 
-    async def get_settings(self) -> dict[str, Any]:
+    async def get_settings(self, user_id: str | None = None) -> dict[str, Any]:
         if self.database_url:
-            row = await self._pg_query("select * from public.weeg_settings order by updated_at desc limit 1", fetch="one")
+            if user_id:
+                row = await self._pg_query("select * from public.weeg_settings where user_id = %s order by updated_at desc limit 1", (user_id,), fetch="one")
+            else:
+                row = await self._pg_query("select * from public.weeg_settings order by updated_at desc limit 1", fetch="one")
             return row or {}
         try:
-            remote = await self._supabase("weeg_settings", params={"select": "*", "limit": "1"})
+            params = {"select": "*", "limit": "1"}
+            if user_id:
+                params["user_id"] = f"eq.{user_id}"
+            remote = await self._supabase("weeg_settings", params=params)
             if remote:
                 return remote[0]
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
-            row = db.execute("select payload from settings where id=1").fetchone()
+            if user_id:
+                row = db.execute("select payload from user_settings where user_id=?", (user_id,)).fetchone()
+            else:
+                row = db.execute("select payload from settings where id=1").fetchone()
             return json.loads(row[0]) if row else {}
 
-    async def save_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+    async def save_settings(self, settings: dict[str, Any], user_id: str | None = None) -> dict[str, Any]:
         if self.database_url:
-            current = await self.get_settings()
+            current = await self.get_settings(user_id=user_id)
             merged = {**current, **settings}
             symbols = merged.get("symbols") or []
             fields = ["symbols", "macro_timeframe", "trend_timeframe", "confirmation_timeframe", "execution_timeframe", "risk_per_trade", "minimum_rr", "confidence_threshold"]
@@ -517,17 +598,34 @@ class Store:
             current_id = current.get("id")
             if current_id:
                 assignments = ", ".join([f"{field} = %s" for field in fields])
+                if user_id:
+                    return await self._pg_query(f"update public.weeg_settings set {assignments}, updated_at = now() where id = %s and user_id = %s returning *", values + [current_id, user_id], fetch="one")
                 return await self._pg_query(f"update public.weeg_settings set {assignments}, updated_at = now() where id = %s returning *", values + [current_id], fetch="one")
+            if user_id:
+                fields.insert(0, "user_id")
+                values.insert(0, user_id)
             placeholders = ", ".join(["%s"] * len(fields))
             return await self._pg_query(f"insert into public.weeg_settings ({', '.join(fields)}) values ({placeholders}) returning *", values, fetch="one")
         try:
-            remote = await self._supabase("weeg_settings", method="POST", data=settings)
+            remote_data = {**settings, **({"user_id": user_id} if user_id else {})}
+            if user_id:
+                existing = await self._supabase("weeg_settings", params={"select": "id", "user_id": f"eq.{user_id}", "limit": "1"})
+                if existing:
+                    remote = await self._supabase("weeg_settings", method="PATCH", params={"id": f"eq.{existing[0]['id']}", "user_id": f"eq.{user_id}"}, data=remote_data)
+                else:
+                    remote = await self._supabase("weeg_settings", method="POST", params={"on_conflict": "user_id"}, data=remote_data)
+            else:
+                remote = await self._supabase("weeg_settings", method="POST", data=remote_data)
             if remote:
                 return remote[0]
         except Exception:
-            pass
+            if self.persistent_storage_configured:
+                raise
         with sqlite3.connect(self.db_path) as db:
-            db.execute("insert or replace into settings(id,payload) values(1,?)", (json.dumps(settings),))
+            if user_id:
+                db.execute("insert or replace into user_settings(user_id,payload,updated_at) values(?,?,?)", (user_id, json.dumps(settings), datetime.now(timezone.utc).isoformat()))
+            else:
+                db.execute("insert or replace into settings(id,payload) values(1,?)", (json.dumps(settings),))
             db.commit()
         return settings
 

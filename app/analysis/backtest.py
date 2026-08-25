@@ -89,6 +89,15 @@ def _simulate_one(candles: list[dict[str, Any]], index: int, signal: dict[str, A
     }
 
 
+def _candle_time(candle: dict[str, Any]) -> float:
+    value = candle.get("time", candle.get("open_time", 0))
+    try:
+        numeric = float(value)
+        return numeric / 1000 if numeric > 100_000_000_000 else numeric
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def run_backtest(
     symbol: str,
     candles: list[dict[str, Any]],
@@ -98,6 +107,7 @@ def run_backtest(
     threshold: int = 65,
     minimum_rr: float = 2.0,
     split: float = 0.7,
+    mtf_candles: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
     if len(candles) < 80:
         return {"error": "تحتاج المحاكاة إلى 80 شمعة على الأقل"}
@@ -110,6 +120,17 @@ def run_backtest(
         signal = analyze(symbol, history, interval, threshold, minimum_rr)
         if signal.get("signal") not in ("LONG", "SHORT"):
             continue
+        if mtf_candles:
+            current_time = _candle_time(candles[index])
+            aligned = True
+            for higher_interval in ("1h", "4h"):
+                higher_history = [candle for candle in mtf_candles.get(higher_interval, []) if _candle_time(candle) < current_time]
+                higher_signal = analyze(symbol, higher_history, higher_interval, threshold, minimum_rr) if len(higher_history) >= 80 else {"signal": None, "ready": False}
+                if not higher_signal.get("ready") or higher_signal.get("signal") != signal.get("signal"):
+                    aligned = False
+                    break
+            if not aligned:
+                continue
         live_entry = float(candles[index]["open"])
         safety = assess_entry(signal, live_entry, signal.get("applied_minimum_rr", minimum_rr))
         candle_time = signal.get("signal_candle_time")
@@ -124,6 +145,7 @@ def run_backtest(
         else:
             trades.append(simulated)
     result = _stats(trades, blocked, symbol, interval, "OUT_OF_SAMPLE")
+    result["mtf_alignment_applied"] = bool(mtf_candles)
     result["walk_forward"] = {
         "in_sample_cut_index": cut,
         "out_of_sample_start": cut,

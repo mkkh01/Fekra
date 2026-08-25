@@ -20,7 +20,9 @@ const state = {
   cycleSummaryRequestId: 0,
   pushRegistration: null,
   pushConfig: null,
-  pushSubscription: null
+  pushSubscription: null,
+  session: null,
+  authClient: null
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -41,9 +43,102 @@ function toast(text) {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { cache: 'no-store', ...options, headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', ...(options.headers || {}) } });
-  if (!response.ok) throw new Error(await response.text());
+  const authHeaders = state.session?.access_token ? { Authorization: `Bearer ${state.session.access_token}` } : {};
+  const response = await fetch(url, { cache: 'no-store', ...options, headers: { Accept: 'application/json', 'Cache-Control': 'no-cache', ...authHeaders, ...(options.headers || {}) } });
+  if (!response.ok) {
+    if (response.status === 401) showAuthGate('انتهت الجلسة؛ سجّل الدخول مرة أخرى.');
+    throw new Error(await response.text());
+  }
   return response.json();
+}
+
+function showAuthGate(message = 'يجب تسجيل الدخول للوصول إلى البيانات الحساسة.') {
+  const gate = $('#auth-gate');
+  if (gate) gate.hidden = false;
+  const text = $('#auth-message');
+  if (text) text.textContent = message;
+  const appShell = $('.app-shell');
+  if (appShell) appShell.hidden = true;
+  const logout = $('#logout-btn');
+  if (logout) logout.hidden = true;
+}
+
+function hideAuthGate() {
+  const gate = $('#auth-gate');
+  if (gate) gate.hidden = true;
+  const appShell = $('.app-shell');
+  if (appShell) appShell.hidden = false;
+  const logout = $('#logout-btn');
+  if (logout) logout.hidden = false;
+}
+
+async function initAuth() {
+  const form = $('#auth-form');
+  const signup = $('#auth-signup');
+  const logout = $('#auth-logout');
+  const topLogout = $('#logout-btn');
+  try {
+    const config = await fetch('/api/auth/config', { cache: 'no-store' }).then((response) => response.json());
+    if (!config.enabled || !window.supabase) {
+      showAuthGate('المصادقة غير مهيأة؛ أضف SUPABASE_PUBLISHABLE_KEY إلى بيئة الخادم.');
+      return false;
+    }
+    state.authClient = window.supabase.createClient(config.url, config.public_key, { auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true } });
+    const current = await state.authClient.auth.getSession();
+    state.session = current.data.session;
+    const submit = async (mode) => {
+      const email = $('#auth-email').value.trim();
+      const password = $('#auth-password').value;
+      const button = form.querySelector('button[type="submit"]');
+      button.disabled = true;
+      try {
+        const result = mode === 'signup'
+          ? await state.authClient.auth.signUp({ email, password })
+          : await state.authClient.auth.signInWithPassword({ email, password });
+        if (result.error) throw result.error;
+        state.session = result.data.session;
+        if (state.session) {
+          hideAuthGate();
+          toast(mode === 'signup' ? 'تم إنشاء الحساب وتسجيل الدخول' : 'تم تسجيل الدخول');
+          await startApp();
+        } else {
+          $('#auth-message').textContent = 'تم إنشاء الحساب؛ تحقق من بريدك الإلكتروني ثم سجّل الدخول.';
+        }
+      } catch (error) {
+        $('#auth-message').textContent = error.message || 'تعذر إتمام المصادقة';
+      } finally {
+        button.disabled = false;
+      }
+    };
+    form.onsubmit = (event) => { event.preventDefault(); submit('signin'); };
+    signup.onclick = () => submit('signup');
+    const signOut = async () => { await state.authClient.auth.signOut(); state.session = null; appStarted = false; state.overview = []; state.signal = null; showAuthGate('تم تسجيل الخروج.'); };
+    logout.onclick = signOut;
+    topLogout.onclick = signOut;
+    state.authClient.auth.onAuthStateChange((_event, session) => {
+      state.session = session;
+      if (!session) { appStarted = false; showAuthGate('انتهت الجلسة؛ سجّل الدخول مرة أخرى.'); }
+    });
+    if (!state.session) {
+      showAuthGate();
+      return false;
+    }
+    hideAuthGate();
+    return true;
+  } catch (_) {
+    showAuthGate('تعذر تهيئة المصادقة؛ تحقق من إعدادات Supabase.');
+    return false;
+  }
+}
+
+let appStarted = false;
+async function startApp() {
+  if (appStarted) return;
+  appStarted = true;
+  initPushNotifications();
+  await loadOverview();
+  await loadTrades();
+  await loadCycleSummary();
 }
 
 function pushButton(text, enabled = false, disabled = false) {
@@ -531,8 +626,5 @@ $$('.trade-tabs button').forEach((button) => button.onclick = () => {
 $$('.chart-toolbar input[data-layer]').forEach((input) => input.onchange = () => toast(`طبقة ${input.parentElement.textContent.trim()} ${input.checked ? 'مفعلة' : 'متوقفة'} — ستظهر التفاصيل مع الإشارات القادمة`));
 
 (async () => {
-  initPushNotifications();
-  await loadOverview();
-  await loadTrades();
-  await loadCycleSummary();
+  if (await initAuth()) await startApp();
 })();

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     supabase_key: str | None = None
     supabase_service_role_key: str | None = None
     supabase_anon_key: str | None = None
+    supabase_publishable_key: str | None = None
     database_url: str | None = None
     supabase_db_url: str | None = None
     redis_url: str | None = None
@@ -21,7 +22,7 @@ class Settings(BaseSettings):
     binance_ws_url: str = "wss://data-stream.binance.vision/stream,wss://stream.binance.us:9443/stream"
     symbols: str = ",".join(DEFAULT_SYMBOLS)
     default_interval: str = "15m"
-    cors_origins: str = "*"
+    cors_origins: str = ""
     confidence_threshold: int = 65
     minimum_rr: float = 2.0
     risk_per_trade: float = 0.005
@@ -53,6 +54,10 @@ class Settings(BaseSettings):
         return "https://obljtphynhmbcbyxyrjg.supabase.co"
 
     @property
+    def supabase_public_key(self) -> str | None:
+        return self.supabase_publishable_key or self.supabase_anon_key
+
+    @property
     def supabase_auth_keys(self) -> list[str]:
         return [key for key in (self.supabase_service_role_key, self.supabase_key, self.supabase_anon_key) if key]
 
@@ -66,7 +71,7 @@ class Settings(BaseSettings):
 
     @property
     def cors_list(self) -> list[str]:
-        return [x.strip() for x in self.cors_origins.split(",")]
+        return [x.strip() for x in self.cors_origins.split(",") if x.strip() and x.strip() != "*"]
 
 @lru_cache
 def get_settings() -> Settings:

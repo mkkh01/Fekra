@@ -7,7 +7,10 @@ Weeg is a modular crypto-market analysis dashboard. It is an **analysis and pape
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 export SUPABASE_URL="https://<project-ref>.supabase.co"
-export SUPABASE_KEY="<publishable-or-service-key>"
+# مفتاح الخدمة للخادم فقط؛ لا تضعه في المتصفح.
+export SUPABASE_SERVICE_ROLE_KEY="<service-role-key>"
+# مفتاح Supabase publishable/anon للواجهة والمصادقة فقط.
+export SUPABASE_PUBLISHABLE_KEY="<publishable-key>"
 export REDIS_URL="redis://..."
 .venv/bin/python main.py
 ```
@@ -16,7 +19,7 @@ Open `http://localhost:10000`. Render uses `venv/bin/python main.py` from `rende
 
 ## Supabase
 
-Apply `migrations/001_weeg_schema.sql` to the selected project before enabling remote persistence. The backend uses the REST interface when `SUPABASE_URL` and `SUPABASE_KEY` are present. The schema stores settings, trade journal records, and event-ready lifecycle data. For production, use a server-side key in Render's protected environment variables and do not expose it to the browser.
+Apply the tracked migrations through `migrations/009_multitenant_rls.sql` before enabling remote persistence. The backend uses the REST interface with the server-side `SUPABASE_SERVICE_ROLE_KEY`; the browser authentication flow uses `SUPABASE_PUBLISHABLE_KEY` only. The schema stores settings, trade journal records, and event-ready lifecycle data. Production requires both keys in protected Render environment variables; never expose the service-role key to the browser. Protected API routes require a valid Supabase Auth Bearer token.
 
 ## Redis
 
@@ -40,6 +43,6 @@ The browser provides a TradingView-inspired layout without copying TradingView's
 
 يعمل الإصدار الآمن افتراضيًا في `WEEG_SHADOW_MODE=true` مع إبقاء `WEEG_SAFETY_GATES_ENABLED=false`. يسجل النظام آخر شمعة مغلقة فعليًا، عمر الإشارة، سعر الإشارة، سعر الدخول الحي، انحراف الدخول، RR بعد التنفيذ، مكونات `reversal_risk` ومؤشرات `overextension`، لكنه لا يحوّل التحذيرات إلى حظر إنتاجي قبل القياس.
 
-يحفظ جدول `weeg_shadow_signals` المرشحين المحظورين افتراضيًا ونتيجتهم الافتراضية، ويمكن قراءة الملخص من `/api/summary/shadow`. لا يجوز تفعيل حواجز الإنتاج قبل إكمال قياس baseline وWalk-Forward وPaper Canary وفق معايير القبول في خطة Weeg. تبقى حماية +1R وقياس MFE/MAE في وضع الرصد فقط، ولا ينقل التطبيق وقف الخسارة تلقائيًا.
+يحفظ جدول `weeg_shadow_signals` المرشحين المحظورين افتراضيًا ونتيجتهم الافتراضية، ويمكن قراءة الملخص من `/api/summary/shadow` بعد المصادقة. لا يجوز تفعيل حواجز الإنتاج قبل إكمال قياس baseline وWalk-Forward وPaper Canary وفق معايير القبول في خطة Weeg. تبقى حماية +1R وقياس MFE/MAE في وضع الرصد فقط، ولا ينقل التطبيق وقف الخسارة تلقائيًا.
 
 تتطلب البيئة الحالية مفاتيح `WEEG_SHADOW_MODE` و`WEEG_SAFETY_GATES_ENABLED` و`WEEG_MFE_SHADOW` و`SIGNAL_MAX_AGE_SECONDS` و`MTF_SYNC_TOLERANCE_SECONDS` عند الحاجة إلى تغيير القيم الافتراضية؛ وفي حال عدم ضبطها تُستخدم القيم الآمنة المذكورة أعلاه.

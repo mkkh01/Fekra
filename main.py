@@ -3,7 +3,7 @@ import asyncio, logging, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,6 +16,7 @@ from app.analysis.backtest import run_backtest
 from app.storage.store import Store
 from app.notifications import PushNotifier
 from app.telegram import TelegramBotController, TelegramNotifier
+from app.auth import require_user
 
 settings = get_settings()
 market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["15m", "1h", "4h"])
@@ -27,6 +28,7 @@ push_log = logging.getLogger("weeg.push")
 AUTO_SCAN_SECONDS = 60
 STORAGE_RETRY_SECONDS = 30
 EXIT_SCAN_SECONDS = 5
+SHADOW_OUTCOME_HORIZON_SECONDS = 24 * 60 * 60
 cycle_state = {
     "status": "STARTING",
     "started_at": None,
@@ -218,11 +220,21 @@ async def _record_shadow_signal(symbol: str, result: dict, live_entry: float | N
 async def _evaluate_shadow_outcomes() -> int:
     updated_count = 0
     try:
-        pending = [row for row in await store.list_shadow_signals(200) if (row.get("outcome_status") or "PENDING") == "PENDING"]
+        pending = [row for row in await store.list_shadow_signals(500) if (row.get("outcome_status") or "PENDING") == "PENDING"]
     except Exception as exc:
         log.warning("shadow outcome scan failed: %s", exc)
         return 0
     for row in pending:
+        decision_time = row.get("decision_time")
+        if decision_time:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(decision_time).replace("Z", "+00:00"))).total_seconds()
+                if age > SHADOW_OUTCOME_HORIZON_SECONDS:
+                    await store.update_shadow_signal(str(row["id"]), {"outcome_status": "EXPIRED", "outcome_checked_at": datetime.now(timezone.utc).isoformat()})
+                    updated_count += 1
+                    continue
+            except (TypeError, ValueError):
+                log.warning("invalid shadow decision_time for %s", row.get("id"))
         symbol = str(row.get("symbol") or "").upper()
         price = (market.tickers.get(symbol) or {}).get("price")
         if not symbol or price is None or not row.get("direction"):
@@ -379,7 +391,6 @@ async def _auto_signal_loop():
             if store.has_persistent_storage:
                 cycle_state["scanned_symbols"] = len(settings.symbol_list)
                 saved = await _scan_and_store_auto_signals()
-                await _evaluate_shadow_outcomes()
                 cycle_state["saved_trades"] = len(saved)
                 cycle_state["last_saved_symbols"] = [trade.get("symbol") for trade in saved]
                 cycle_state["completed_cycles"] += 1
@@ -499,6 +510,7 @@ async def _manage_open_trades():
                     asyncio.create_task(_notify_telegram_trade_closed(updated))
                 elif updated:
                     log.debug("trade %s excursion telemetry updated at price=%s", trade.get("id"), price)
+            await _evaluate_shadow_outcomes()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -544,26 +556,34 @@ async def push_service_worker():
     )
 
 
+@app.get("/api/auth/config")
+async def auth_config():
+    return {"enabled": bool(settings.supabase_public_key), "url": settings.supabase_http_url if settings.supabase_public_key else None, "public_key": settings.supabase_public_key}
+
 @app.get("/api/push/config")
 async def push_config():
     return {"enabled": push_notifier.configured, "public_key": push_notifier.public_key}
 
 
 @app.post("/api/push/subscribe")
-async def push_subscribe(subscription: PushSubscriptionInput):
+async def push_subscribe(subscription: PushSubscriptionInput, user: dict = Depends(require_user)):
     if not push_notifier.configured:
         raise HTTPException(status_code=503, detail="إشعارات الهاتف غير مهيأة في الخادم")
-    saved = await store.upsert_push_subscription(subscription.model_dump())
-    return {"ok": True, "endpoint": saved.get("endpoint"), "subscriptions": len(await store.list_push_subscriptions())}
+    saved = await store.upsert_push_subscription(subscription.model_dump(), user_id=str(user["id"]))
+    return {"ok": True, "endpoint": saved.get("endpoint"), "subscriptions": len(await store.list_push_subscriptions(user_id=str(user["id"]))) }
 
 
 @app.delete("/api/push/subscribe")
-async def push_unsubscribe(endpoint: str):
-    return {"ok": await store.delete_push_subscription(endpoint)}
+async def push_unsubscribe(endpoint: str, user: dict = Depends(require_user)):
+    return {"ok": await store.delete_push_subscription(endpoint, user_id=str(user["id"]))}
 
+
+@app.get("/api/healthz")
+async def healthz():
+    return {"status": "ok", "service": "weeg"}
 
 @app.get("/api/health")
-async def health(response: Response):
+async def health(response: Response, user: dict = Depends(require_user)):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     persistent = store.has_persistent_storage
     return {
@@ -593,7 +613,7 @@ async def health(response: Response):
     }
 
 @app.get("/api/summary/cycle/state")
-async def summary_cycle_state(response: Response):
+async def summary_cycle_state(response: Response, user: dict = Depends(require_user)):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -608,7 +628,7 @@ async def summary_cycle_state(response: Response):
     }
 
 @app.get("/api/summary/shadow")
-async def summary_shadow(limit: int = 200):
+async def summary_shadow(limit: int = 200, user: dict = Depends(require_user)):
     rows = await store.list_shadow_signals(limit=min(max(limit, 1), 500))
     blocked = [row for row in rows if row.get("would_block")]
     warnings = [row for row in rows if row.get("warning_reasons")]
@@ -628,15 +648,15 @@ async def summary_shadow(limit: int = 200):
 
 
 @app.get("/api/summary/cycle")
-async def summary_cycle(response: Response):
+async def summary_cycle(response: Response, user: dict = Depends(require_user)):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     warnings = []
     open_trades = []
     closed_trades = []
     if store.has_persistent_storage:
         results = await asyncio.gather(
-            store.list_active_trades(),
-            store.list_trades("CLOSED_OR_STOPPED"),
+            store.list_active_trades(user_id=str(user["id"])),
+            store.list_trades("CLOSED_OR_STOPPED", user_id=str(user["id"])),
             return_exceptions=True,
         )
         if isinstance(results[0], Exception):
@@ -706,35 +726,48 @@ async def signal(symbol: str, interval: str = "15m"):
     return analyze(symbol, rows, interval, settings.confidence_threshold, settings.minimum_rr)
 
 @app.get("/api/backtest/{symbol}")
-async def backtest(symbol: str, interval: str = "15m", limit: int = 500):
-    symbol = symbol.upper(); rows = await market.ensure_history(symbol, interval)
-    return run_backtest(symbol, rows[-min(limit, 500):], interval, threshold=settings.confidence_threshold, minimum_rr=settings.minimum_rr)
+async def backtest(symbol: str, interval: str = "15m", limit: int = 500, user: dict = Depends(require_user)):
+    symbol = symbol.upper()
+    capped_limit = min(max(limit, 80), 500)
+    rows = await market.ensure_history(symbol, interval)
+    mtf_rows = None
+    if interval == "15m":
+        rows_4h, rows_1h = await asyncio.gather(market.ensure_history(symbol, "4h"), market.ensure_history(symbol, "1h"))
+        mtf_rows = {"1h": rows_1h, "4h": rows_4h}
+    return run_backtest(symbol, rows[-capped_limit:], interval, threshold=settings.confidence_threshold, minimum_rr=settings.minimum_rr, mtf_candles=mtf_rows)
 
 @app.get("/api/trades")
-async def trades(status: str | None = None): return await store.list_trades(status.upper() if status else None)
+async def trades(status: str | None = None, user: dict = Depends(require_user)):
+    return await store.list_trades(status.upper() if status else None, user_id=str(user["id"]))
 
 @app.post("/api/trades/paper")
-async def create_paper_trade(payload: TradeInput):
+async def create_paper_trade(payload: TradeInput, user: dict = Depends(require_user)):
     if payload.direction not in ("LONG", "SHORT"): raise HTTPException(400, "direction must be LONG or SHORT")
-    trade = {"id": str(uuid.uuid4()), **payload.model_dump(), "symbol": payload.symbol.upper(), "status": "OPEN", "signal_time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
+    symbol = payload.symbol.upper()
+    if symbol not in settings.symbol_list:
+        raise HTTPException(400, "العملة غير موجودة في قائمة الأصول")
+    levels_valid = ((payload.direction == "LONG" and payload.stop_loss < payload.entry < payload.take_profit_1 < payload.take_profit_2) or (payload.direction == "SHORT" and payload.take_profit_2 < payload.take_profit_1 < payload.entry < payload.stop_loss))
+    if not levels_valid:
+        raise HTTPException(400, "ترتيب مستويات الصفقة غير صالح")
+    trade = {"id": str(uuid.uuid4()), **payload.model_dump(), "user_id": str(user["id"]), "symbol": symbol, "status": "OPEN", "source": "manual", "auto_created": False, "signal_time": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()}
     return await store.create_trade(trade)
 
 @app.patch("/api/trades/{trade_id}")
-async def update_trade(trade_id: str, patch: dict):
-    result = await store.update_trade(trade_id, patch)
+async def update_trade(trade_id: str, patch: dict, user: dict = Depends(require_user)):
+    result = await store.update_trade(trade_id, patch, user_id=str(user["id"]))
     if result is None: raise HTTPException(404, "الصفقة غير موجودة")
     return result
 
 @app.get("/api/settings")
-async def get_app_settings():
-    saved = await store.get_settings()
+async def get_app_settings(user: dict = Depends(require_user)):
+    saved = await store.get_settings(user_id=str(user["id"]))
     return {"symbols": settings.symbol_list, "confidence_threshold": settings.confidence_threshold, "minimum_rr": settings.minimum_rr, "risk_per_trade": settings.risk_per_trade, **saved}
 
 @app.post("/api/settings")
-async def save_app_settings(payload: SettingsInput):
+async def save_app_settings(payload: SettingsInput, user: dict = Depends(require_user)):
     data = payload.model_dump(exclude_none=True)
     if "symbols" in data: data["symbols"] = [s.upper() for s in data["symbols"]]
-    return await store.save_settings(data)
+    return await store.save_settings(data, user_id=str(user["id"]))
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
