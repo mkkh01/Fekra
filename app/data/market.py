@@ -19,6 +19,7 @@ class MarketData:
         self.candles: dict[tuple[str, str], deque] = defaultdict(lambda: deque(maxlen=500))
         self.tickers: dict[str, dict[str, Any]] = {}
         self._task: asyncio.Task | None = None
+        self._socket = None
         self._listeners: set[asyncio.Queue] = set()
         self.last_event_at: float | None = None
         self.last_ticker_at: dict[str, float] = {}
@@ -97,18 +98,20 @@ class MarketData:
         receive_age = None if last_received is None else max(0.0, now - last_received)
         max_age = interval_seconds * max_age_multiplier
         fresh = bool(rows) and candle_age is not None and candle_age <= max_age
+        history_ready = len(rows) >= 30
         return {
             "symbol": symbol,
             "interval": interval,
             "rows": len(rows),
+            "history_ready": history_ready,
             "last_closed_candle_time": last_time,
             "last_closed_received_at": last_received,
             "source": self.last_candle_source.get((symbol, interval)),
             "candle_age_seconds": round(candle_age, 1) if candle_age is not None else None,
             "receive_age_seconds": round(receive_age, 1) if receive_age is not None else None,
             "max_age_seconds": max_age,
-            "fresh": fresh,
-            "reason": None if fresh else ("NO_CLOSED_CANDLE" if not rows else "STALE_CLOSED_CANDLE"),
+            "fresh": fresh and history_ready,
+            "reason": None if fresh and history_ready else ("INSUFFICIENT_HISTORY" if not history_ready else "STALE_CLOSED_CANDLE"),
         }
 
     def data_quality_vetoes(self, symbol: str, intervals: tuple[str, ...] = ("4h", "1h", "15m")) -> list[str]:
@@ -162,11 +165,18 @@ class MarketData:
         task = self._task
         self._task = None
         if task:
+            socket = self._socket
+            if socket is not None:
+                try:
+                    await asyncio.wait_for(socket.close(), timeout=2)
+                except Exception:
+                    pass
             task.cancel()
             try:
-                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=8)
-            except asyncio.TimeoutError:
-                log.warning("market websocket did not stop within timeout")
+                await asyncio.wait_for(task, timeout=3)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                if not task.done():
+                    task.cancel()
 
     async def _run(self):
         streams = "/".join([*(f"{s.lower()}@kline_{interval}" for s in self.symbols for interval in self.analysis_intervals), *(f"{s.lower()}@ticker" for s in self.symbols)])
@@ -179,6 +189,7 @@ class MarketData:
                 base_url = self.ws_urls[candidate_index % len(self.ws_urls)]
                 url = f"{base_url}?streams={streams}"
                 async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=5, open_timeout=15) as socket:
+                    self._socket = socket
                     delay = 1
                     async for raw in socket:
                         payload = json.loads(raw); data = payload.get("data", {})
@@ -217,7 +228,11 @@ class MarketData:
                             ticker = {**ticker, "volume": candle["volume"]}
                             self.tickers[symbol] = ticker
                         await self._broadcast({"type": "candle", "symbol": symbol, "interval": interval, "candle": candle, "ticker": ticker})
-            except asyncio.CancelledError: raise
+                    self._socket = None
+            except asyncio.CancelledError:
+                self._socket = None
+                raise
+
             except Exception as exc:
                 self.last_error = str(exc)
                 self.reconnect_count += 1

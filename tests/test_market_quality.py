@@ -9,7 +9,9 @@ class MarketQualityTests(unittest.TestCase):
         market = MarketData("https://example.invalid", "wss://example.invalid", ["BTCUSDT"])
         now = time.time()
         interval = 900
-        market.candles[("BTCUSDT", "15m")].append({"time": now - interval - 100, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1, "closed": True})
+        for index in range(30):
+            candle_time = now - (30 - index) * interval - 100
+            market.candles[("BTCUSDT", "15m")].append({"time": candle_time, "open": 1, "high": 1, "low": 1, "close": 1, "volume": 1, "closed": True})
         market.last_closed_received_at[("BTCUSDT", "15m")] = now
         quality = market.data_quality_snapshot("BTCUSDT", "15m")
         self.assertEqual(quality["candle_age_seconds"], 100)
