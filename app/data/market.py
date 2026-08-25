@@ -29,6 +29,9 @@ class MarketData:
         self.last_candle_source: dict[tuple[str, str], str] = {}
         self.last_error: str | None = None
         self.reconnect_count = 0
+        self._exchange_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._book_ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._clock_cache: tuple[float, dict[str, Any]] | None = None
 
     async def load_history(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         url = f"{self.rest_url}/api/v3/klines"
@@ -45,8 +48,10 @@ class MarketData:
         now = time.time()
         result = []
         for r in rows:
-            candle = {"time": int(r[0] / 1000), "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5])}
-            candle["closed"] = candle["time"] + self._interval_seconds(interval) <= now
+            open_time = int(r[0] / 1000)
+            close_time = open_time + self._interval_seconds(interval)
+            candle = {"time": open_time, "open_time": open_time, "close_time": close_time, "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4]), "volume": float(r[5]), "source_timestamp": close_time}
+            candle["closed"] = close_time <= now
             result.append(candle)
         result = [candle for candle in result if candle["closed"]]
         self.candles[(symbol, interval)].clear(); self.candles[(symbol, interval)].extend(result)
@@ -57,8 +62,39 @@ class MarketData:
             self.last_closed_received_at[(symbol, interval)] = received_at
             self.last_candle_source[(symbol, interval)] = "rest"
         if result and symbol not in self.tickers:
-            self.tickers[symbol] = {"symbol": symbol, "price": result[-1]["close"], "change": 0.0, "volume": result[-1]["volume"], "updated_at": result[-1]["time"]}
+            self.tickers[symbol] = {"symbol": symbol, "price": result[-1]["close"], "change": 0.0, "volume": result[-1]["volume"], "bid": None, "ask": None, "updated_at": result[-1]["source_timestamp"]}
         return result
+
+    async def load_history_window(self, symbol: str, interval: str, days: int = 180) -> list[dict[str, Any]]:
+        """Load a reproducible closed-candle window without truncating at the cache size."""
+        days = max(1, min(int(days), 365))
+        end_ms = int(time.time() * 1000)
+        start_ms = end_ms - days * 86400 * 1000
+        cursor = start_ms
+        raw_rows: list[list[Any]] = []
+        while cursor < end_ms:
+            payload = await self._get_json("/api/v3/klines", {"symbol": symbol.upper(), "interval": interval, "startTime": cursor, "endTime": end_ms, "limit": 1000})
+            if not payload:
+                break
+            raw_rows.extend(payload)
+            last_open = int(payload[-1][0])
+            next_cursor = last_open + self._interval_seconds(interval) * 1000
+            if next_cursor <= cursor:
+                break
+            cursor = next_cursor
+            if len(payload) < 1000:
+                break
+            await asyncio.sleep(0.05)
+        now = time.time()
+        result = []
+        for row in raw_rows:
+            open_time = int(row[0] / 1000)
+            close_time = open_time + self._interval_seconds(interval)
+            if close_time > now:
+                continue
+            result.append({"time": open_time, "open_time": open_time, "close_time": close_time, "open": float(row[1]), "high": float(row[2]), "low": float(row[3]), "close": float(row[4]), "volume": float(row[5]), "source_timestamp": close_time, "closed": True})
+        dedup = {int(row["time"]): row for row in result}
+        return [dedup[key] for key in sorted(dedup)]
 
     @staticmethod
     def _interval_seconds(interval: str) -> int:
@@ -114,14 +150,42 @@ class MarketData:
             "reason": None if fresh and history_ready else ("INSUFFICIENT_HISTORY" if not history_ready else "STALE_CLOSED_CANDLE"),
         }
 
+    def current_open_candle(self, symbol: str, interval: str) -> dict[str, Any] | None:
+        cache = self.candles[(symbol.upper(), interval)]
+        if not cache:
+            return None
+        row = dict(cache[-1])
+        return row if row.get("closed") is False else None
+
+    def data_integrity_snapshot(self, symbol: str, interval: str) -> dict[str, Any]:
+        rows = closed_candles(list(self.candles[(symbol, interval)]), interval)
+        expected = self._interval_seconds(interval)
+        gaps = []
+        duplicates = []
+        seen = set()
+        for row in rows:
+            timestamp = int(row["time"])
+            if timestamp in seen:
+                duplicates.append(timestamp)
+            seen.add(timestamp)
+        for previous, current in zip(rows, rows[1:]):
+            delta = int(current["time"]) - int(previous["time"])
+            if delta != expected:
+                gaps.append({"from": previous["time"], "to": current["time"], "missing_candles": max(0, delta // expected - 1)})
+        malformed = [row.get("time") for row in rows if any(row.get(key) is None for key in ("open", "high", "low", "close", "volume"))]
+        return {"symbol": symbol, "interval": interval, "gaps": gaps, "duplicates": duplicates, "malformed": malformed, "valid": not gaps and not duplicates and not malformed}
+
     def data_quality_vetoes(self, symbol: str, intervals: tuple[str, ...] = ("4h", "1h", "15m")) -> list[str]:
         vetoes = []
         for interval in intervals:
             snapshot = self.data_quality_snapshot(symbol, interval)
+            integrity = self.data_integrity_snapshot(symbol, interval)
             if not snapshot["fresh"]:
                 age = snapshot["candle_age_seconds"]
                 age_text = "غير متوفرة" if age is None else f"قديمة {age:.0f} ثانية"
                 vetoes.append(f"بيانات {interval} لـ{symbol} غير صالحة: {age_text}")
+            if not integrity["valid"]:
+                vetoes.append(f"فجوة أو تكرار في بيانات {interval} لـ{symbol}")
         return vetoes
 
     def health_snapshot(self) -> dict[str, Any]:
@@ -146,6 +210,68 @@ class MarketData:
             "reconnect_count": self.reconnect_count,
             "symbols": symbol_health,
         }
+
+    async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
+        url = f"{self.rest_url}{path}"
+        async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+
+    async def clock_snapshot(self) -> dict[str, Any]:
+        cached = self._clock_cache
+        if cached and time.time() - cached[0] < 10:
+            return dict(cached[1])
+        server_time = time.time()
+        payload = await self._get_json("/api/v3/time", {})
+        exchange_time = float(payload.get("serverTime", 0)) / 1000.0
+        observed = time.time()
+        local_mid = (server_time + observed) / 2.0
+        snapshot = {"server_time_utc": observed, "exchange_time_utc": exchange_time, "clock_offset_ms": (exchange_time - local_mid) * 1000.0, "clock_skew_limit_ms": 1000, "valid": exchange_time > 0}
+        snapshot["clock_skew_ok"] = snapshot["valid"] and abs(snapshot["clock_offset_ms"]) <= snapshot["clock_skew_limit_ms"]
+        self._clock_cache = (time.time(), snapshot)
+        return dict(snapshot)
+
+    async def exchange_filters(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        cached = self._exchange_info_cache.get(symbol)
+        if cached and time.time() - cached[0] < 3600:
+            return dict(cached[1])
+        payload = await self._get_json("/api/v3/exchangeInfo", {"symbol": symbol})
+        item = next((row for row in payload.get("symbols", []) if row.get("symbol") == symbol), None)
+        if not item:
+            raise RuntimeError(f"exchangeInfo missing for {symbol}")
+        filters = {row.get("filterType"): row for row in item.get("filters", [])}
+        price_filter = filters.get("PRICE_FILTER", {})
+        lot_filter = filters.get("LOT_SIZE", {})
+        notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
+        normalized = {
+            "symbol": symbol,
+            "status": item.get("status"),
+            "base_asset": item.get("baseAsset"),
+            "quote_asset": item.get("quoteAsset"),
+            "tick_size": float(price_filter.get("tickSize", 0) or 0),
+            "min_price": float(price_filter.get("minPrice", 0) or 0),
+            "max_price": float(price_filter.get("maxPrice", 0) or 0),
+            "step_size": float(lot_filter.get("stepSize", 0) or 0),
+            "min_qty": float(lot_filter.get("minQty", 0) or 0),
+            "max_qty": float(lot_filter.get("maxQty", 0) or 0),
+            "min_notional": float(notional_filter.get("minNotional", 0) or 0),
+            "apply_min_to_market": notional_filter.get("applyMinToMarket"),
+            "raw_filters": filters,
+        }
+        self._exchange_info_cache[symbol] = (time.time(), normalized)
+        return dict(normalized)
+
+    async def book_ticker(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        cached = self._book_ticker_cache.get(symbol)
+        if cached and time.time() - cached[0] < 10:
+            return dict(cached[1])
+        payload = await self._get_json("/api/v3/ticker/bookTicker", {"symbol": symbol})
+        normalized = {"symbol": symbol, "bid": float(payload.get("bidPrice", 0) or 0) or None, "ask": float(payload.get("askPrice", 0) or 0) or None, "bid_qty": float(payload.get("bidQty", 0) or 0), "ask_qty": float(payload.get("askQty", 0) or 0), "observed_at": time.time()}
+        self._book_ticker_cache[symbol] = (time.time(), normalized)
+        return dict(normalized)
 
     def subscribe(self) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=100)
@@ -202,14 +328,16 @@ class MarketData:
                             previous = self.tickers.get(symbol, {}).get("price")
                             price = float(data["c"])
                             change = float(data.get("P", 0.0))
-                            self.tickers[symbol] = {"symbol": symbol, "price": price, "change": change, "volume": float(data.get("v", 0.0)), "updated_at": int(data.get("E", 0) / 1000)}
+                            self.tickers[symbol] = {"symbol": symbol, "price": price, "change": change, "volume": float(data.get("v", 0.0)), "bid": float(data.get("b", 0.0) or 0.0) or None, "ask": float(data.get("a", 0.0) or 0.0) or None, "updated_at": int(data.get("E", 0) / 1000)}
                             self.last_ticker_at[symbol] = time.time()
                             await self._broadcast({"type": "ticker", "symbol": symbol, "price": price, "ticker": self.tickers[symbol]})
                             continue
                         k = data.get("k")
                         if not k: continue
                         symbol, interval = k["s"], k["i"]
-                        candle = {"time": int(k["t"] / 1000), "open": float(k["o"]), "high": float(k["h"]), "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]), "closed": bool(k["x"])}
+                        open_time = int(k["t"] / 1000)
+                        close_time = int(k["T"] / 1000)
+                        candle = {"time": open_time, "open_time": open_time, "close_time": close_time, "open": float(k["o"]), "high": float(k["h"]), "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]), "source_timestamp": int(data.get("E", 0) / 1000), "closed": bool(k["x"])}
                         cache = self.candles[(symbol, interval)]
                         received_at = time.time()
                         self.last_candle_at[(symbol, interval)] = received_at
@@ -222,7 +350,7 @@ class MarketData:
                         ticker = self.tickers.get(symbol, {})
                         if not ticker:
                             previous = cache[-2]["close"] if len(cache) > 1 else candle["close"]
-                            ticker = {"symbol": symbol, "price": candle["close"], "change": (candle["close"] - previous) / max(previous, 1e-9) * 100, "volume": candle["volume"], "updated_at": candle["time"]}
+                            ticker = {"symbol": symbol, "price": candle["close"], "change": (candle["close"] - previous) / max(previous, 1e-9) * 100, "volume": candle["volume"], "bid": None, "ask": None, "updated_at": candle["source_timestamp"]}
                             self.tickers[symbol] = ticker
                         else:
                             ticker = {**ticker, "volume": candle["volume"]}

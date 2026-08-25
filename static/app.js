@@ -21,8 +21,10 @@ const state = {
   pushRegistration: null,
   pushConfig: null,
   pushSubscription: null,
-  session: null,
-  authClient: null
+  authClient: null,
+  ifvgHealth: null,
+  ifvgSummary: null,
+  ifvgDecision: null
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -139,6 +141,7 @@ async function startApp() {
   await loadOverview();
   await loadTrades();
   await loadCycleSummary();
+  await loadIfvgPanel();
 }
 
 function pushButton(text, enabled = false, disabled = false) {
@@ -397,6 +400,7 @@ async function selectSymbol(symbol) {
     const signal = await api(`/api/signals/${encodeURIComponent(state.symbol)}?interval=${encodeURIComponent(state.interval)}`);
     if (requestId !== state.requestId) return;
     renderSignal({ ...signal, ticker: activeOverviewItem()?.ticker });
+    if (state.symbol) loadIfvgDecision();
     $('#last-update').textContent = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
   } catch (error) {
     if (requestId === state.requestId) toast(`تعذر تحميل ${state.symbol}`);
@@ -435,6 +439,7 @@ async function refreshActive() {
     const signal = await api(`/api/signals/${encodeURIComponent(state.symbol)}?interval=${encodeURIComponent(state.interval)}`);
     if (requestId !== state.requestId) return;
     renderSignal({ ...signal, ticker: activeOverviewItem()?.ticker });
+    loadIfvgDecision();
     renderWatchlist();
     $('#last-update').textContent = new Date().toLocaleTimeString('ar-EG', { hour: '2-digit', minute: '2-digit' });
   } catch (error) {
@@ -526,6 +531,65 @@ async function loadCycleSummary() {
   }
 }
 
+function renderIfvgDecision(decision) {
+  const target = $('#ifvg-decision-content');
+  if (!target || !decision) return;
+  const passed = decision.decision === 'ENTRY_ELIGIBLE';
+  const failed = (decision.failed_gates || []).join('، ') || 'لا توجد بوابات فاشلة مسجلة';
+  const gates = Object.entries(decision.hard_gates || {}).map(([key, value]) => `<span class="reason ${value.passed ? 'positive' : 'negative'}">${key}: ${value.passed ? 'PASS' : 'FAIL'}</span>`).join('');
+  target.innerHTML = `<div class="ifvg-decision-head"><strong class="${passed ? 'positive' : 'negative'}">${passed ? 'ENTRY ELIGIBLE' : 'REJECTED'}</strong><span>${decision.symbol || '—'} · ${decision.strategy_version || '—'}</span></div><div class="ifvg-levels"><span>Entry: ${fmt(decision.entry_fill)}</span><span>Stop: ${fmt(decision.stop_price)}</span><span>Target: ${fmt(decision.target_price)}</span><span>Net RR: ${fmt(decision.net_rr)}</span><span>Score: ${fmt(decision.score)}</span></div><div class="reasons">${gates || '<span class="reason">لم تُحسب البوابات بعد</span>'}</div><div class="ifvg-rejection">${decision.primary_rejection_reason || failed}</div>`;
+}
+
+function renderIfvgPanel() {
+  const health = state.ifvgHealth || {};
+  const summary = state.ifvgSummary || {};
+  const status = $('#ifvg-status');
+  if (!status) return;
+  const active = health.status === 'RUNNING';
+  status.textContent = health.status || 'UNKNOWN';
+  status.className = `cycle-status ${active ? 'positive' : health.status === 'ERROR' ? 'negative' : 'neutral'}`;
+  $('#ifvg-mode').textContent = health.paper_only ? (health.enabled ? 'Paper · مفعّل' : 'Paper · متوقف') : 'غير آمن';
+  $('#ifvg-storage').textContent = health.storage ? 'متصل' : 'غير جاهز';
+  $('#ifvg-cycles').textContent = fmt(health.completed_cycles);
+  $('#ifvg-signals').textContent = fmt(health.last_entry_count);
+  $('#ifvg-open').textContent = fmt((summary.trade_states || {}).POSITION_OPEN);
+  $('#ifvg-total').textContent = fmt(summary.trades);
+  const panel = $('#ifvg-panel');
+  if (panel) panel.classList.toggle('ifvg-disabled', !health.enabled);
+}
+
+function renderIfvgTrades(rows) {
+  const body = $('#ifvg-trades-body');
+  if (!body) return;
+  body.innerHTML = rows.length ? rows.map((trade) => `<tr><td>${trade.symbol || '—'}</td><td>${trade.state || '—'}</td><td>${fmt(trade.entry_fill ?? trade.entry_reference)}</td><td>${fmt(trade.stop_price)}</td><td>${fmt(trade.target_price)}</td><td>${fmt(trade.net_rr)}</td><td class="${trade.result === 'WIN' ? 'positive' : trade.result === 'LOSS' ? 'negative' : 'neutral'}">${trade.result || 'قيد التشغيل'}</td></tr>`).join('') : '<tr><td colspan="7" class="neutral">لا توجد صفقات IFVG بعد</td></tr>';
+}
+
+async function loadIfvgPanel() {
+  try {
+    const [health, summary, trades] = await Promise.all([
+      api(`/api/ifvg/health?ts=${Date.now()}`),
+      api(`/api/ifvg/summary?ts=${Date.now()}`),
+      api(`/api/ifvg/trades?limit=100&ts=${Date.now()}`)
+    ]);
+    state.ifvgHealth = health;
+    state.ifvgSummary = summary;
+    renderIfvgPanel();
+    renderIfvgTrades(Array.isArray(trades) ? trades : []);
+  } catch (_) {
+    const status = $('#ifvg-status');
+    if (status) { status.textContent = 'غير متاح'; status.className = 'cycle-status negative'; }
+  }
+}
+
+async function loadIfvgDecision() {
+  try {
+    state.ifvgDecision = await api(`/api/ifvg/decision/${encodeURIComponent(state.symbol)}?ts=${Date.now()}`);
+    renderIfvgDecision(state.ifvgDecision);
+  } catch (_) {
+    toast('تعذر تحميل قرار IFVG');
+  }
+}
+
 async function loadTrades(status = 'open') {
   try {
     const rows = await api(`/api/trades?status=${status === 'open' ? 'OPEN' : 'CLOSED_OR_STOPPED'}`);
@@ -596,12 +660,14 @@ $('#refresh-btn').onclick = async () => {
   await loadOverview();
   await loadTrades(document.querySelector('.trade-tabs button.active')?.dataset.status || 'open');
   await loadCycleSummary();
+  await loadIfvgPanel();
   toast('تم تحديث بيانات اللوحة عند الطلب');
 };
 $('#price-btn').onclick = () => refreshActive();
 $('#cycle-refresh-btn').onclick = () => loadCycleSummary();
 $('#system-refresh-btn').onclick = async () => {
   await loadCycleSummary();
+  await loadIfvgPanel();
   const health = await api(`/api/health?manual=${Date.now()}`);
   toast(health.status === 'ok' ? 'حالة النظام سليمة' : 'توجد مشكلة في حالة النظام');
 };
@@ -609,12 +675,15 @@ $('#system-refresh-btn').onclick = async () => {
 $('#add-symbol').onclick = () => toast('يمكن تتبع أي زوج موجود في قائمة SYMBOLS من إعدادات Render');
 $('#settings-btn').onclick = () => toast('الإعدادات تحفظ عبر Supabase عند توفير SUPABASE_URL وSUPABASE_KEY');
 $('#explain-btn').onclick = () => toast((state.signal?.reasons || []).join(' · ') || 'لا يوجد تفسير متاح');
+$('#ifvg-refresh-btn').onclick = loadIfvgPanel;
+$('#ifvg-decision-btn').onclick = loadIfvgDecision;
 
 $$('#timeframes button').forEach((button) => button.onclick = async () => {
   $$('#timeframes button').forEach((element) => element.classList.remove('selected'));
   button.classList.add('selected');
   state.interval = button.dataset.interval;
   await loadOverview();
+  await loadIfvgPanel();
 });
 
 $$('.trade-tabs button').forEach((button) => button.onclick = () => {

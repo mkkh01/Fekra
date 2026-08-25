@@ -37,6 +37,24 @@ class Settings(BaseSettings):
     signal_max_age_seconds: int = 900
     mtf_sync_tolerance_seconds: int = 120
 
+    # IFVG is a separate long-only Spot paper strategy. It never calls exchange order endpoints.
+    ifvg_enabled: bool = False
+    ifvg_symbols: str | None = None
+    ifvg_scan_seconds: int = 60
+    ifvg_config_version: str = "1.2.1-baseline"
+    ifvg_quote_balance: float | None = None
+    ifvg_max_position_value_quote: float | None = None
+    ifvg_max_global_open_positions: int | None = None
+    ifvg_daily_loss_fraction: float = 0.0
+    ifvg_fee_bps: float = 10.0
+    ifvg_spread_bps: float = 4.0
+    ifvg_entry_slippage_bps: float = 2.0
+    ifvg_exit_slippage_bps: float = 2.0
+    ifvg_stop_slippage_bps: float = 4.0
+    ifvg_latency_bps: float = 0.0
+    ifvg_orderbook_required: bool = False
+    ifvg_user_id: str | None = None
+
     @property
     def postgres_dsn(self) -> str | None:
         if self.database_url:
@@ -68,6 +86,11 @@ class Settings(BaseSettings):
     @property
     def symbol_list(self) -> list[str]:
         return [s.strip().upper() for s in self.symbols.split(",") if s.strip()]
+
+    @property
+    def ifvg_symbol_list(self) -> list[str]:
+        raw = self.ifvg_symbols if self.ifvg_symbols is not None else self.symbols
+        return [s.strip().upper() for s in raw.split(",") if s.strip()]
 
     @property
     def cors_list(self) -> list[str]:

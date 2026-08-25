@@ -136,6 +136,7 @@ class TelegramBotController:
         self.market = market
         self.settings = settings
         self.cycle_state = cycle_state
+        self.ifvg_service: Any | None = None
 
     @property
     def configured(self) -> bool:
@@ -156,7 +157,8 @@ class TelegramBotController:
                     {"text": "الأسعار الحالية", "callback_data": "prices"},
                     {"text": "Summary Cycle", "callback_data": "cycle"},
                 ],
-                [{"text": "أداء النظام", "callback_data": "performance"}],
+                    [{"text": "أداء النظام", "callback_data": "performance"}],
+                    [{"text": "IFVG Spot Paper", "callback_data": "ifvg_summary"}],
                 [{"text": "القائمة الرئيسية", "callback_data": "menu"}],
             ]
         }
@@ -256,6 +258,23 @@ class TelegramBotController:
             )
         )
 
+    async def render_ifvg_summary(self) -> str:
+        if not self.ifvg_service:
+            return "IFVG Spot Paper\n\nالخدمة غير مهيأة."
+        trades = await self.store.list_ifvg_trades(limit=100)
+        open_trades = [trade for trade in trades if trade.get("state") == "POSITION_OPEN"]
+        return "\n".join((
+            "IFVG Spot Paper | لوحة مستقلة",
+            "",
+            f"الخدمة: {self.ifvg_service.health().get('status', '—')}",
+            f"التفعيل: {'نعم' if self.ifvg_service.health().get('enabled') else 'لا'}",
+            f"الصفقات المفتوحة: {len(open_trades)}",
+            f"إجمالي السجل: {len(trades)}",
+            *[f"{trade.get('symbol', '—')} | Entry {trade.get('entry_fill', '—')} | SL {trade.get('stop_price', '—')} | TP {trade.get('target_price', '—')}" for trade in open_trades[:10]],
+            "",
+            "التداول ورقي فقط؛ لا توجد أوامر حقيقية.",
+        ))
+
     async def render_performance(self) -> str:
         closed = await self.store.list_trades("CLOSED_OR_STOPPED")
         open_trades = await self.store.list_active_trades()
@@ -290,6 +309,8 @@ class TelegramBotController:
                 return self.render_cycle()
             if callback_data == "performance":
                 return await self.render_performance()
+            if callback_data == "ifvg_summary":
+                return await self.render_ifvg_summary()
             return await self.render_menu()
         except Exception as exc:
             log.warning("telegram control query failed: %s", type(exc).__name__)
@@ -313,6 +334,8 @@ class TelegramBotController:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if text else ""
         if command in {"/start", "/menu"}:
             await self.notifier.send_message(await self.render_menu(), self.menu_markup(), str(chat_id))
+        elif command == "/ifvg":
+            await self.notifier.send_message(await self.render_ifvg_summary(), self.menu_markup(), str(chat_id))
 
     async def run(self) -> None:
         if not self.configured:

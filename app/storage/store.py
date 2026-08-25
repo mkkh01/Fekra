@@ -1,6 +1,7 @@
 import asyncio
 import json
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -89,6 +90,16 @@ class Store:
                 pass
             db.execute("create table if not exists user_settings (user_id text primary key, payload text not null, updated_at text not null)")
             db.execute("create table if not exists shadow_signals (id text primary key, payload text not null, created_at text not null)")
+            db.execute("create table if not exists ifvg_configs (id text primary key, user_id text, strategy_id text not null, config_version text not null, enabled integer not null, payload text not null, updated_at text not null)")
+            db.execute("create table if not exists ifvg_snapshots (id text primary key, user_id text, symbol text not null, decision_time text not null, content_hash text not null unique, payload text not null, created_at text not null)")
+            db.execute("create table if not exists ifvg_setups (id text primary key, user_id text, symbol text not null, state text not null, source_fvg_id text not null, inversion_time text, payload text not null, created_at text not null, updated_at text not null)")
+            db.execute("create table if not exists ifvg_trades (id text primary key, user_id text, setup_id text not null unique, symbol text not null, state text not null, payload text not null, created_at text not null, updated_at text not null)")
+            db.execute("create table if not exists ifvg_state_events (id integer primary key autoincrement, setup_id text, trade_id text, to_state text not null, event_time text not null, payload text not null, created_at text not null)")
+            db.execute("create table if not exists ifvg_fills (id integer primary key autoincrement, trade_id text not null, fill_role text not null, fill_sequence integer not null, event_time text not null, payload text not null, created_at text not null, unique(trade_id, fill_role, fill_sequence))")
+            db.execute("create table if not exists ifvg_reservations (id text primary key, user_id text, strategy_id text not null, reservation_key text not null unique, symbol text not null, status text not null, payload text not null, created_at text not null, released_at text)")
+            db.execute("create unique index if not exists ifvg_setups_idempotency_uq on ifvg_setups(symbol, source_fvg_id, ifnull(inversion_time, ''))")
+            db.execute("create unique index if not exists ifvg_trades_active_symbol_uq on ifvg_trades(symbol) where state in ('ENTRY_ELIGIBLE','ORDER_INTENT','ORDER_SUBMITTED','ORDER_PARTIALLY_FILLED','ORDER_FILLED','POSITION_OPEN')")
+            db.execute("create unique index if not exists ifvg_reservations_active_symbol_uq on ifvg_reservations(symbol) where status = 'ACTIVE'")
             db.commit()
 
     async def _pg_query(self, query: str, params: tuple | list = (), fetch: str = "all"):
@@ -435,7 +446,7 @@ class Store:
 
     @staticmethod
     def _pg_value(field: str, value: Any) -> Any:
-        if field in {"signal_reasons", "mtf_vetoes", "mtf_timeframes", "reversal_risk_components", "overextension_metrics", "blocked_reasons", "warning_reasons"}:
+        if field in {"signal_reasons", "mtf_vetoes", "mtf_timeframes", "reversal_risk_components", "overextension_metrics", "blocked_reasons", "warning_reasons", "payload", "failed_gates", "metadata", "fill_model", "config_snapshot"}:
             try:
                 from psycopg.types.json import Jsonb
                 return Jsonb(value if value is not None else [])
@@ -563,6 +574,233 @@ class Store:
             db.execute("update trades set payload=?, status=? where id=?", (json.dumps(trade), trade.get("status", "OPEN"), trade_id))
             db.commit()
             return trade
+
+    @staticmethod
+    def _now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _json_payload(value: Any) -> str:
+        return json.dumps(value, separators=(",", ":"), default=str)
+
+    async def create_ifvg_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        data = {"id": snapshot.get("id") or str(uuid.uuid4()), "strategy_id": "IFVG_SPOT_V1_2", **snapshot}
+        data.setdefault("created_at", self._now_iso())
+        if self.database_url:
+            fields = ["id", "user_id", "strategy_id", "symbol", "decision_time", "data_asof", "config_version", "content_hash", "payload", "created_at"]
+            values = [data.get(field) if field != "payload" else self._pg_value(field, data.get(field, {})) for field in fields]
+            query = f"insert into public.ifvg_snapshots ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) on conflict (content_hash) do update set payload = excluded.payload returning *"
+            return await self._pg_query(query, values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_snapshots", method="POST", params={"on_conflict": "content_hash"}, data=data)
+            if remote:
+                return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("insert or replace into ifvg_snapshots(id,user_id,symbol,decision_time,content_hash,payload,created_at) values(?,?,?,?,?,?,?)", (data["id"], data.get("user_id"), data["symbol"], data["decision_time"], data["content_hash"], self._json_payload(data), data["created_at"]))
+            db.commit()
+        return data
+
+    async def create_ifvg_setup(self, setup: dict[str, Any]) -> dict[str, Any]:
+        data = {"id": setup.get("id") or str(uuid.uuid4()), "strategy_id": "IFVG_SPOT_V1_2", **setup}
+        data.setdefault("created_at", self._now_iso()); data.setdefault("updated_at", data["created_at"])
+        if self.database_url:
+            fields = ["id", "user_id", "strategy_id", "symbol", "source_fvg_id", "state", "state_version", "direction", "zone_low", "zone_high", "sweep_time", "inversion_time", "retest_start_time", "expires_at", "setup_snapshot_id", "config_version", "score", "score_version", "failed_gates", "metadata", "created_at", "updated_at"]
+            values = [self._pg_value(field, data.get(field, [] if field == "failed_gates" else {})) if field in {"failed_gates", "metadata"} else data.get(field) for field in fields]
+            query = f"insert into public.ifvg_setups ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) on conflict (strategy_id, symbol, source_fvg_id, inversion_time) do update set state = excluded.state, state_version = public.ifvg_setups.state_version + 1, score = excluded.score, failed_gates = excluded.failed_gates, metadata = excluded.metadata, updated_at = now() returning *"
+            return await self._pg_query(query, values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_setups", method="POST", params={"on_conflict": "strategy_id,symbol,source_fvg_id,inversion_time"}, data=data)
+            if remote:
+                return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select payload from ifvg_setups where symbol=? and source_fvg_id=? and ifnull(inversion_time,'')=ifnull(?, '')", (data["symbol"], data["source_fvg_id"], data.get("inversion_time"))).fetchone()
+            if row:
+                current = {**json.loads(row[0]), **data, "state_version": int(json.loads(row[0]).get("state_version", 1)) + 1, "updated_at": self._now_iso()}
+                db.execute("update ifvg_setups set state=?,payload=?,updated_at=? where id=?", (current.get("state"), self._json_payload(current), current["updated_at"], current["id"]))
+                db.commit(); return current
+            db.execute("insert into ifvg_setups(id,user_id,symbol,state,source_fvg_id,inversion_time,payload,created_at,updated_at) values(?,?,?,?,?,?,?,?,?)", (data["id"], data.get("user_id"), data["symbol"], data.get("state"), data["source_fvg_id"], data.get("inversion_time"), self._json_payload(data), data["created_at"], data["updated_at"]))
+            db.commit()
+        return data
+
+    async def list_ifvg_setups(self, state: str | None = None, symbol: str | None = None, user_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if self.database_url:
+            conditions, params = ["strategy_id = 'IFVG_SPOT_V1_2'"], []
+            if state: conditions.append("state = %s"); params.append(state)
+            if symbol: conditions.append("symbol = %s"); params.append(symbol.upper())
+            if user_id: conditions.append("(user_id is null or user_id = %s)"); params.append(user_id)
+            return await self._pg_query(f"select * from public.ifvg_setups where {' and '.join(conditions)} order by updated_at desc limit %s", params + [limit])
+        if self.persistent_storage_configured:
+            params = {"select": "*", "strategy_id": "eq.IFVG_SPOT_V1_2", "order": "updated_at.desc", "limit": str(limit)}
+            if state: params["state"] = f"eq.{state}"
+            if symbol: params["symbol"] = f"eq.{symbol.upper()}"
+            if user_id: params["or"] = f"(user_id.is.null,user_id.eq.{user_id})"
+            remote = await self._supabase("ifvg_setups", params=params)
+            if remote is not None: return remote
+        with sqlite3.connect(self.db_path) as db:
+            if user_id:
+                rows = db.execute("select payload from ifvg_setups where (? is null or state=?) and (? is null or symbol=?) and (user_id is null or user_id=?) order by updated_at desc limit ?", (state, state, symbol.upper() if symbol else None, symbol.upper() if symbol else None, user_id, limit)).fetchall()
+            else:
+                rows = db.execute("select payload from ifvg_setups where (? is null or state=?) and (? is null or symbol=?) order by updated_at desc limit ?", (state, state, symbol.upper() if symbol else None, symbol.upper() if symbol else None, limit)).fetchall()
+            return [json.loads(row[0]) for row in rows]
+
+    async def update_ifvg_setup(self, setup_id: str, patch: dict[str, Any], user_id: str | None = None) -> dict[str, Any] | None:
+        allowed = {"state", "state_version", "retest_start_time", "expires_at", "score", "score_version", "failed_gates", "metadata", "updated_at"}
+        data = {key: value for key, value in patch.items() if key in allowed}
+        if not data: return None
+        data.setdefault("updated_at", self._now_iso())
+        if self.database_url:
+            assignments = ", ".join(f"{key} = %s" for key in data)
+            values = [self._pg_value(key, value) if key in {"failed_gates", "metadata"} else value for key, value in data.items()] + [setup_id]
+            where = "id = %s" + (" and user_id = %s" if user_id else "")
+            if user_id: values.append(user_id)
+            return await self._pg_query(f"update public.ifvg_setups set {assignments} where {where} returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            params = {"id": f"eq.{setup_id}"}
+            if user_id: params["user_id"] = f"eq.{user_id}"
+            remote = await self._supabase("ifvg_setups", method="PATCH", params=params, data=data)
+            return remote[0] if remote else None
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select payload from ifvg_setups where id=?" + (" and user_id=?" if user_id else ""), (setup_id, user_id) if user_id else (setup_id,)).fetchone()
+            if not row: return None
+            current = {**json.loads(row[0]), **data}
+            db.execute("update ifvg_setups set state=?, payload=?, updated_at=? where id=?", (current.get("state"), self._json_payload(current), current["updated_at"], setup_id)); db.commit(); return current
+
+    async def create_ifvg_trade(self, trade: dict[str, Any]) -> dict[str, Any]:
+        data = {"id": trade.get("id") or str(uuid.uuid4()), "strategy_id": "IFVG_SPOT_V1_2", **trade}
+        data.setdefault("created_at", self._now_iso()); data.setdefault("updated_at", data["created_at"])
+        if self.database_url:
+            fields = ["id", "user_id", "strategy_id", "setup_id", "symbol", "direction", "state", "entry_reference", "entry_fill", "stop_price", "stop_fill", "target_price", "target_fill_gross", "exit_fill", "gross_rr", "net_rr", "risk_per_unit_quote", "risk_amount_quote", "quantity", "entry_fee_quote", "stop_fee_quote", "target_fee_quote", "exit_fee_quote", "realized_pnl_quote", "fill_model", "config_snapshot", "data_snapshot_id", "score", "score_version", "failed_gates", "decision_time", "opened_at", "closed_at", "exit_reason", "result", "metadata", "created_at", "updated_at"]
+            values = [self._pg_value(field, data.get(field, {} if field in {"fill_model", "config_snapshot", "metadata"} else [])) if field in {"fill_model", "config_snapshot", "failed_gates", "metadata"} else data.get(field) for field in fields]
+            query = f"insert into public.ifvg_trades ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) returning *"
+            return await self._pg_query(query, values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_trades", method="POST", data=data)
+            if remote: return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            db.execute("insert into ifvg_trades(id,user_id,setup_id,symbol,state,payload,created_at,updated_at) values(?,?,?,?,?,?,?,?)", (data["id"], data.get("user_id"), data["setup_id"], data["symbol"], data.get("state"), self._json_payload(data), data["created_at"], data["updated_at"])); db.commit()
+        return data
+
+    async def list_ifvg_trades(self, state: str | None = None, user_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if self.database_url:
+            conditions, params = ["strategy_id = 'IFVG_SPOT_V1_2'"], []
+            if state: conditions.append("state = %s"); params.append(state)
+            if user_id: conditions.append("(user_id is null or user_id = %s)"); params.append(user_id)
+            return await self._pg_query(f"select * from public.ifvg_trades where {' and '.join(conditions)} order by decision_time desc limit %s", params + [limit])
+        if self.persistent_storage_configured:
+            params = {"select": "*", "strategy_id": "eq.IFVG_SPOT_V1_2", "order": "decision_time.desc", "limit": str(limit)}
+            if state: params["state"] = f"eq.{state}"
+            if user_id: params["or"] = f"(user_id.is.null,user_id.eq.{user_id})"
+            remote = await self._supabase("ifvg_trades", params=params)
+            if remote is not None: return remote
+        with sqlite3.connect(self.db_path) as db:
+            if user_id:
+                rows = db.execute("select payload from ifvg_trades where (? is null or state=?) and (user_id is null or user_id=?) order by created_at desc limit ?", (state, state, user_id, limit)).fetchall()
+            else:
+                rows = db.execute("select payload from ifvg_trades where (? is null or state=?) order by created_at desc limit ?", (state, state, limit)).fetchall()
+            return [json.loads(row[0]) for row in rows]
+
+    async def find_open_ifvg_trade(self, symbol: str, user_id: str | None = None) -> dict[str, Any] | None:
+        active = "('ENTRY_ELIGIBLE','ORDER_INTENT','ORDER_SUBMITTED','ORDER_PARTIALLY_FILLED','ORDER_FILLED','POSITION_OPEN')"
+        if self.database_url:
+            query = f"select * from public.ifvg_trades where strategy_id = 'IFVG_SPOT_V1_2' and symbol = %s and state in {active}" + (" and (user_id is null or user_id = %s)" if user_id else "") + " order by decision_time desc limit 1"
+            return await self._pg_query(query, (symbol.upper(), user_id) if user_id else (symbol.upper(),), fetch="one")
+        if self.persistent_storage_configured:
+            params = {"select": "*", "strategy_id": "eq.IFVG_SPOT_V1_2", "symbol": f"eq.{symbol.upper()}", "state": "in." + active.replace("'", ""), "limit": "1"}
+            remote = await self._supabase("ifvg_trades", params=params)
+            if remote: return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            if user_id:
+                row = db.execute("select payload from ifvg_trades where symbol=? and state in ('ENTRY_ELIGIBLE','ORDER_INTENT','ORDER_SUBMITTED','ORDER_PARTIALLY_FILLED','ORDER_FILLED','POSITION_OPEN') and (user_id is null or user_id=?) order by created_at desc limit 1", (symbol.upper(), user_id)).fetchone()
+            else:
+                row = db.execute("select payload from ifvg_trades where symbol=? and state in ('ENTRY_ELIGIBLE','ORDER_INTENT','ORDER_SUBMITTED','ORDER_PARTIALLY_FILLED','ORDER_FILLED','POSITION_OPEN') order by created_at desc limit 1", (symbol.upper(),)).fetchone()
+            return json.loads(row[0]) if row else None
+
+    async def update_ifvg_trade(self, trade_id: str, patch: dict[str, Any], user_id: str | None = None) -> dict[str, Any] | None:
+        allowed = {"state", "entry_fill", "stop_fill", "target_fill_gross", "exit_fill", "gross_rr", "net_rr", "quantity", "entry_fee_quote", "stop_fee_quote", "target_fee_quote", "exit_fee_quote", "realized_pnl_quote", "failed_gates", "opened_at", "closed_at", "exit_reason", "result", "metadata", "updated_at"}
+        data = {key: value for key, value in patch.items() if key in allowed}; data.setdefault("updated_at", self._now_iso())
+        if self.database_url:
+            assignments = ", ".join(f"{key} = %s" for key in data); values = [self._pg_value(key, value) if key in {"failed_gates", "metadata"} else value for key, value in data.items()] + [trade_id]
+            where = "id = %s" + (" and user_id = %s" if user_id else "")
+            if user_id: values.append(user_id)
+            return await self._pg_query(f"update public.ifvg_trades set {assignments} where {where} returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            params = {"id": f"eq.{trade_id}"};
+            if user_id: params["user_id"] = f"eq.{user_id}"
+            remote = await self._supabase("ifvg_trades", method="PATCH", params=params, data=data)
+            return remote[0] if remote else None
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select payload from ifvg_trades where id=?" + (" and user_id=?" if user_id else ""), (trade_id, user_id) if user_id else (trade_id,)).fetchone()
+            if not row: return None
+            current = {**json.loads(row[0]), **data}; db.execute("update ifvg_trades set state=?,payload=?,updated_at=? where id=?", (current.get("state"), self._json_payload(current), current["updated_at"], trade_id)); db.commit(); return current
+
+    async def create_ifvg_state_event(self, event: dict[str, Any]) -> dict[str, Any]:
+        data = {"strategy_id": "IFVG_SPOT_V1_2", **event}; data.setdefault("created_at", self._now_iso())
+        if self.database_url:
+            fields = ["setup_id", "trade_id", "from_state", "to_state", "reason_code", "reason_detail", "event_time", "candle_time", "data_snapshot_id", "metadata"]
+            values = [self._pg_value(field, data.get(field, {})) if field == "metadata" else data.get(field) for field in fields]
+            return await self._pg_query(f"insert into public.ifvg_state_events ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_state_events", method="POST", data=data)
+            if remote: return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            cursor = db.execute("insert into ifvg_state_events(setup_id,trade_id,to_state,event_time,payload,created_at) values(?,?,?,?,?,?)", (data.get("setup_id"), data.get("trade_id"), data["to_state"], data["event_time"], self._json_payload(data), data["created_at"])); db.commit(); data["id"] = cursor.lastrowid
+        return data
+
+    async def create_ifvg_fill(self, fill: dict[str, Any]) -> dict[str, Any]:
+        data = {"strategy_id": "IFVG_SPOT_V1_2", **fill}; data.setdefault("created_at", self._now_iso()); data.setdefault("fill_sequence", 1)
+        if self.database_url:
+            fields = ["trade_id", "fill_role", "fill_sequence", "reference_price", "executable_price", "quantity", "fee_quote", "fee_asset", "spread_component", "slippage_component", "latency_component", "event_time", "intent_time", "execution_time", "metadata"]
+            values = [self._pg_value(field, data.get(field, {})) if field == "metadata" else data.get(field) for field in fields]
+            return await self._pg_query(f"insert into public.ifvg_fills ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) on conflict (trade_id, fill_role, fill_sequence) do update set executable_price = excluded.executable_price, quantity = excluded.quantity, fee_quote = excluded.fee_quote returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_fills", method="POST", params={"on_conflict": "trade_id,fill_role,fill_sequence"}, data=data)
+            if remote: return remote[0]
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select id from ifvg_fills where trade_id=? and fill_role=? and fill_sequence=?", (data["trade_id"], data["fill_role"], data["fill_sequence"])).fetchone()
+            if row:
+                data["id"] = row[0]
+                db.execute("update ifvg_fills set payload=?,event_time=? where id=?", (self._json_payload(data), data["event_time"], row[0]))
+            else:
+                cursor = db.execute("insert into ifvg_fills(trade_id,fill_role,fill_sequence,event_time,payload,created_at) values(?,?,?,?,?,?)", (data["trade_id"], data["fill_role"], data["fill_sequence"], data["event_time"], self._json_payload(data), data["created_at"])); data["id"] = cursor.lastrowid
+                db.execute("update ifvg_fills set payload=? where id=?", (self._json_payload(data), data["id"]))
+            db.commit()
+        return data
+
+    async def list_ifvg_fills(self, trade_id: str, limit: int = 200) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        if self.database_url: return await self._pg_query("select * from public.ifvg_fills where trade_id = %s order by event_time asc limit %s", (trade_id, limit))
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_fills", params={"select": "*", "trade_id": f"eq.{trade_id}", "order": "event_time.asc", "limit": str(limit)})
+            if remote is not None: return remote
+        with sqlite3.connect(self.db_path) as db: return [json.loads(row[0]) for row in db.execute("select payload from ifvg_fills where trade_id=? order by event_time asc limit ?", (trade_id, limit)).fetchall()]
+
+    async def create_ifvg_reservation(self, reservation: dict[str, Any]) -> dict[str, Any] | None:
+        data = {"id": reservation.get("id") or str(uuid.uuid4()), "strategy_id": "IFVG_SPOT_V1_2", **reservation}; data.setdefault("created_at", self._now_iso()); data.setdefault("status", "ACTIVE")
+        if self.database_url:
+            fields = ["id", "user_id", "strategy_id", "reservation_key", "symbol", "trade_id", "reserved_quantity", "reserved_quote", "reserved_risk_quote", "status", "expires_at", "metadata", "created_at", "released_at"]
+            values = [self._pg_value(field, data.get(field, {})) if field == "metadata" else data.get(field) for field in fields]
+            return await self._pg_query(f"insert into public.ifvg_reservations ({', '.join(fields)}) values ({', '.join(['%s'] * len(fields))}) on conflict (reservation_key) do nothing returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_reservations", method="POST", params={"on_conflict": "reservation_key"}, data=data)
+            return remote[0] if remote else None
+        with sqlite3.connect(self.db_path) as db:
+            try: db.execute("insert into ifvg_reservations(id,user_id,strategy_id,reservation_key,symbol,status,payload,created_at,released_at) values(?,?,?,?,?,?,?,?,?)", (data["id"], data.get("user_id"), data["strategy_id"], data["reservation_key"], data["symbol"], data["status"], self._json_payload(data), data["created_at"], data.get("released_at"))); db.commit(); return data
+            except sqlite3.IntegrityError: return None
+
+    async def update_ifvg_reservation(self, reservation_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+        data = {key: value for key, value in patch.items() if key in {"status", "released_at", "metadata"}}
+        if self.database_url:
+            if not data: return None
+            assignments = ", ".join(f"{key} = %s" for key in data); values = [self._pg_value(key, value) if key == "metadata" else value for key, value in data.items()] + [reservation_id]
+            return await self._pg_query(f"update public.ifvg_reservations set {assignments} where id = %s returning *", values, fetch="one")
+        if self.persistent_storage_configured:
+            remote = await self._supabase("ifvg_reservations", method="PATCH", params={"id": f"eq.{reservation_id}"}, data=data); return remote[0] if remote else None
+        with sqlite3.connect(self.db_path) as db:
+            row = db.execute("select payload from ifvg_reservations where id=?", (reservation_id,)).fetchone()
+            if not row: return None
+            current = {**json.loads(row[0]), **data}; db.execute("update ifvg_reservations set status=?,released_at=?,payload=? where id=?", (current.get("status"), current.get("released_at"), self._json_payload(current), reservation_id)); db.commit(); return current
 
     async def get_settings(self, user_id: str | None = None) -> dict[str, Any]:
         if self.database_url:

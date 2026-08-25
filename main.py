@@ -1,6 +1,7 @@
 from __future__ import annotations
 import asyncio, logging, uuid
 from contextlib import asynccontextmanager
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response
@@ -17,9 +18,11 @@ from app.storage.store import Store
 from app.notifications import PushNotifier
 from app.telegram import TelegramBotController, TelegramNotifier
 from app.auth import require_user
+from app.strategies.ifvg.service import IFVGService
+from app.strategies.ifvg.backtest import run_ifvg_backtest
 
 settings = get_settings()
-market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["15m", "1h", "4h"])
+market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["5m", "15m", "1h", "4h"])
 store = Store(settings.database_path, settings.supabase_http_url, settings.supabase_auth_keys, settings.redis_url, settings.postgres_dsn)
 push_notifier = PushNotifier(store, settings.vapid_private_key, settings.vapid_subject)
 telegram_notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
@@ -49,6 +52,20 @@ cycle_state = {
     "shadow_outcome_updates": 0,
 }
 telegram_bot = TelegramBotController(telegram_notifier, store, market, settings, cycle_state)
+
+async def _ifvg_event_callback(event: dict[str, Any]) -> None:
+    event_type = event.get("type")
+    trade = event.get("trade") or {}
+    log.info("IFVG paper event=%s trade=%s symbol=%s", event_type, trade.get("id"), trade.get("symbol"))
+    if event_type == "ifvg_trade_opened":
+        asyncio.create_task(push_notifier.ifvg_trade_opened(trade))
+        asyncio.create_task(telegram_notifier.ifvg_trade_opened(trade))
+    elif event_type == "ifvg_trade_closed":
+        asyncio.create_task(push_notifier.ifvg_trade_closed(trade))
+        asyncio.create_task(telegram_notifier.ifvg_trade_closed(trade))
+
+ifvg_service = IFVGService(settings, market, store, event_callback=_ifvg_event_callback)
+telegram_bot.ifvg_service = ifvg_service
 
 class TradeInput(BaseModel):
     symbol: str
@@ -534,6 +551,7 @@ async def lifespan(app: FastAPI):
     if not store.has_persistent_storage:
         log.error("automatic signal loop waiting for persistent Supabase storage; backend=%s error=%s", store.backend_name, store.storage_last_error)
     exit_task = asyncio.create_task(_manage_open_trades())
+    await ifvg_service.start()
     try:
         yield
     finally:
@@ -542,6 +560,7 @@ async def lifespan(app: FastAPI):
         if telegram_task:
             telegram_task.cancel()
         exit_task.cancel()
+        await ifvg_service.stop()
         tasks = [exit_task] + ([auto_task] if auto_task else []) + ([telegram_task] if telegram_task else [])
         await asyncio.gather(*tasks, return_exceptions=True)
         await market.stop()
@@ -616,6 +635,7 @@ async def health(response: Response, user: dict = Depends(require_user)):
         "shadow_mode": settings.weeg_shadow_mode,
         "safety_gates_enabled": settings.weeg_safety_gates_enabled,
         "mfe_shadow": settings.weeg_mfe_shadow,
+        "ifvg": ifvg_service.health(),
         "warning": None if persistent else "التخزين الدائم غير جاهز؛ الفحص الآلي ينتظر اتصال Supabase ولن يحفظ صفقات في SQLite المؤقت",
     }
 
@@ -746,6 +766,53 @@ async def backtest(symbol: str, interval: str = "15m", limit: int = 500, user: d
         rows_4h, rows_1h = await asyncio.gather(market.ensure_history(symbol, "4h"), market.ensure_history(symbol, "1h"))
         mtf_rows = {"1h": rows_1h, "4h": rows_4h}
     return run_backtest(symbol, rows[-capped_limit:], interval, threshold=settings.confidence_threshold, minimum_rr=settings.minimum_rr, mtf_candles=mtf_rows)
+
+@app.get("/api/ifvg/health")
+async def ifvg_health(user: dict = Depends(require_user)):
+    return ifvg_service.health()
+
+@app.get("/api/ifvg/decision/{symbol}")
+async def ifvg_decision(symbol: str, user: dict = Depends(require_user)):
+    symbol = symbol.upper()
+    if symbol not in settings.ifvg_symbol_list:
+        raise HTTPException(404, "العملة غير موجودة في قائمة IFVG")
+    return await ifvg_service.scan_symbol(symbol, persist=False)
+
+@app.get("/api/ifvg/setups")
+async def ifvg_setups(state: str | None = None, symbol: str | None = None, limit: int = 200, user: dict = Depends(require_user)):
+    return await store.list_ifvg_setups(state=state, symbol=symbol, user_id=str(user["id"]), limit=limit)
+
+@app.get("/api/ifvg/trades")
+async def ifvg_trades(state: str | None = None, limit: int = 200, user: dict = Depends(require_user)):
+    return await store.list_ifvg_trades(state=state, user_id=str(user["id"]), limit=limit)
+
+@app.get("/api/ifvg/trades/{trade_id}/fills")
+async def ifvg_trade_fills(trade_id: str, user: dict = Depends(require_user)):
+    trades = await store.list_ifvg_trades(user_id=str(user["id"]), limit=500)
+    if not any(str(trade.get("id")) == trade_id for trade in trades):
+        raise HTTPException(404, "صفقة IFVG غير موجودة")
+    return await store.list_ifvg_fills(trade_id)
+
+@app.get("/api/ifvg/backtest/{symbol}")
+async def ifvg_backtest(symbol: str, days: int = 180, user: dict = Depends(require_user)):
+    symbol = symbol.upper()
+    if symbol not in settings.ifvg_symbol_list:
+        raise HTTPException(404, "العملة غير موجودة في قائمة IFVG")
+    days = min(max(int(days), 1), 180)
+    intervals = ("4h", "1h", "15m", "5m")
+    loaded = await asyncio.gather(*(market.load_history_window(symbol, interval, days) for interval in intervals))
+    filters = await market.exchange_filters(symbol)
+    return run_ifvg_backtest(symbol, dict(zip(intervals, loaded)), config=ifvg_service.config, market=filters, portfolio=ifvg_service._portfolio())
+
+@app.get("/api/ifvg/summary")
+async def ifvg_summary(user: dict = Depends(require_user)):
+    trades = await store.list_ifvg_trades(user_id=str(user["id"]), limit=500)
+    setups = await store.list_ifvg_setups(user_id=str(user["id"]), limit=500)
+    state_counts: dict[str, int] = {}
+    for trade in trades:
+        state = str(trade.get("state") or "UNKNOWN")
+        state_counts[state] = state_counts.get(state, 0) + 1
+    return {"strategy_id": "IFVG_SPOT_V1_2", "health": ifvg_service.health(), "setups": len(setups), "trades": len(trades), "trade_states": state_counts, "paper_only": True}
 
 @app.get("/api/trades")
 async def trades(status: str | None = None, user: dict = Depends(require_user)):

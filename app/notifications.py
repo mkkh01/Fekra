@@ -97,6 +97,33 @@ class PushNotifier:
             data={"event": "trade_opened", "trade_id": trade.get("id"), "symbol": symbol},
         )
 
+    async def ifvg_trade_opened(self, trade: dict[str, Any]) -> dict[str, int]:
+        body = (
+            f"{trade.get('symbol', '')} · Entry {trade.get('entry_fill')} · "
+            f"Stop {trade.get('stop_price')} · Target {trade.get('target_price')} · "
+            f"NetRR {trade.get('net_rr')} · Paper only"
+        )
+        return await self.send(
+            "IFVG Spot Paper — فتح صفقة",
+            body,
+            tag=f"ifvg-open-{trade.get('id', trade.get('symbol', 'trade'))}",
+            data={"event": "ifvg_trade_opened", "strategy_id": "IFVG_SPOT_V1_2", "trade_id": trade.get("id"), "symbol": trade.get("symbol")},
+        )
+
+    async def ifvg_trade_closed(self, trade: dict[str, Any]) -> dict[str, int]:
+        result = trade.get("result") or "UNKNOWN"
+        body = (
+            f"{trade.get('symbol', '')} · Exit {trade.get('exit_fill')} · "
+            f"النتيجة {result} · PnL {trade.get('realized_pnl_quote')} USDT · "
+            f"السبب {trade.get('exit_reason')} · Paper only"
+        )
+        return await self.send(
+            "IFVG Spot Paper — إغلاق صفقة",
+            body,
+            tag=f"ifvg-close-{trade.get('id', trade.get('symbol', 'trade'))}",
+            data={"event": "ifvg_trade_closed", "strategy_id": "IFVG_SPOT_V1_2", "trade_id": trade.get("id"), "symbol": trade.get("symbol")},
+        )
+
     async def trade_closed(self, trade: dict[str, Any]) -> dict[str, int]:
         result = trade.get("result") or ("WIN" if trade.get("status") == "CLOSED" else "LOSS")
         label = "رابحة" if result == "WIN" else "خاسرة"
