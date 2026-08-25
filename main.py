@@ -609,7 +609,7 @@ async def healthz():
     return {"status": "ok", "service": "weeg"}
 
 @app.get("/api/health")
-async def health(response: Response, user: dict = Depends(require_user)):
+async def health(response: Response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     persistent = store.has_persistent_storage
     return {
@@ -640,7 +640,7 @@ async def health(response: Response, user: dict = Depends(require_user)):
     }
 
 @app.get("/api/summary/cycle/state")
-async def summary_cycle_state(response: Response, user: dict = Depends(require_user)):
+async def summary_cycle_state(response: Response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -655,7 +655,7 @@ async def summary_cycle_state(response: Response, user: dict = Depends(require_u
     }
 
 @app.get("/api/summary/shadow")
-async def summary_shadow(limit: int = 200, user: dict = Depends(require_user)):
+async def summary_shadow(limit: int = 200):
     rows = await store.list_shadow_signals(limit=min(max(limit, 1), 500))
     blocked = [row for row in rows if row.get("would_block")]
     warnings = [row for row in rows if row.get("warning_reasons")]
@@ -675,15 +675,15 @@ async def summary_shadow(limit: int = 200, user: dict = Depends(require_user)):
 
 
 @app.get("/api/summary/cycle")
-async def summary_cycle(response: Response, user: dict = Depends(require_user)):
+async def summary_cycle(response: Response):
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     warnings = []
     open_trades = []
     closed_trades = []
     if store.has_persistent_storage:
         results = await asyncio.gather(
-            store.list_active_trades(user_id=str(user["id"])),
-            store.list_trades("CLOSED_OR_STOPPED", user_id=str(user["id"])),
+            store.list_active_trades(),
+            store.list_trades("CLOSED_OR_STOPPED"),
             return_exceptions=True,
         )
         if isinstance(results[0], Exception):
@@ -768,33 +768,33 @@ async def backtest(symbol: str, interval: str = "15m", limit: int = 500, user: d
     return run_backtest(symbol, rows[-capped_limit:], interval, threshold=settings.confidence_threshold, minimum_rr=settings.minimum_rr, mtf_candles=mtf_rows)
 
 @app.get("/api/ifvg/health")
-async def ifvg_health(user: dict = Depends(require_user)):
+async def ifvg_health():
     return ifvg_service.health()
 
 @app.get("/api/ifvg/decision/{symbol}")
-async def ifvg_decision(symbol: str, user: dict = Depends(require_user)):
+async def ifvg_decision(symbol: str):
     symbol = symbol.upper()
     if symbol not in settings.ifvg_symbol_list:
         raise HTTPException(404, "العملة غير موجودة في قائمة IFVG")
     return await ifvg_service.scan_symbol(symbol, persist=False)
 
 @app.get("/api/ifvg/setups")
-async def ifvg_setups(state: str | None = None, symbol: str | None = None, limit: int = 200, user: dict = Depends(require_user)):
-    return await store.list_ifvg_setups(state=state, symbol=symbol, user_id=str(user["id"]), limit=limit)
+async def ifvg_setups(state: str | None = None, symbol: str | None = None, limit: int = 200):
+    return await store.list_ifvg_setups(state=state, symbol=symbol, limit=limit)
 
 @app.get("/api/ifvg/trades")
-async def ifvg_trades(state: str | None = None, limit: int = 200, user: dict = Depends(require_user)):
-    return await store.list_ifvg_trades(state=state, user_id=str(user["id"]), limit=limit)
+async def ifvg_trades(state: str | None = None, limit: int = 200):
+    return await store.list_ifvg_trades(state=state, limit=limit)
 
 @app.get("/api/ifvg/trades/{trade_id}/fills")
-async def ifvg_trade_fills(trade_id: str, user: dict = Depends(require_user)):
-    trades = await store.list_ifvg_trades(user_id=str(user["id"]), limit=500)
+async def ifvg_trade_fills(trade_id: str):
+    trades = await store.list_ifvg_trades(limit=500)
     if not any(str(trade.get("id")) == trade_id for trade in trades):
         raise HTTPException(404, "صفقة IFVG غير موجودة")
     return await store.list_ifvg_fills(trade_id)
 
 @app.get("/api/ifvg/backtest/{symbol}")
-async def ifvg_backtest(symbol: str, days: int = 180, user: dict = Depends(require_user)):
+async def ifvg_backtest(symbol: str, days: int = 180):
     symbol = symbol.upper()
     if symbol not in settings.ifvg_symbol_list:
         raise HTTPException(404, "العملة غير موجودة في قائمة IFVG")
@@ -807,13 +807,13 @@ async def ifvg_backtest(symbol: str, days: int = 180, user: dict = Depends(requi
 IFVG_ACTIVE_STATES = {"ENTRY_ELIGIBLE", "ORDER_INTENT", "ORDER_SUBMITTED", "ORDER_PARTIALLY_FILLED", "ORDER_FILLED", "POSITION_OPEN"}
 IFVG_CLOSED_STATES = {"POSITION_CLOSED", "TP_FILLED", "STOP_TRIGGERED", "REJECTED", "AMBIGUOUS", "RECONCILIATION_REQUIRED"}
 
-async def _ifvg_trade_rows(user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+async def _ifvg_trade_rows(user_id: str | None = None, limit: int = 500) -> list[dict[str, Any]]:
     return await store.list_ifvg_trades(user_id=user_id, limit=min(max(limit, 1), 500))
 
 @app.get("/api/ifvg/summary")
-async def ifvg_summary(user: dict = Depends(require_user)):
-    trades = await _ifvg_trade_rows(str(user["id"]))
-    setups = await store.list_ifvg_setups(user_id=str(user["id"]), limit=500)
+async def ifvg_summary():
+    trades = await _ifvg_trade_rows()
+    setups = await store.list_ifvg_setups(limit=500)
     state_counts: dict[str, int] = {}
     for trade in trades:
         state = str(trade.get("state") or "UNKNOWN")
@@ -821,9 +821,9 @@ async def ifvg_summary(user: dict = Depends(require_user)):
     return {"strategy_id": "IFVG_SPOT_V1_2", "health": ifvg_service.health(), "setups": len(setups), "trades": len(trades), "trade_states": state_counts, "paper_only": True}
 
 @app.get("/api/ifvg/cycle/summary")
-async def ifvg_cycle_summary(user: dict = Depends(require_user)):
-    trades = await _ifvg_trade_rows(str(user["id"]))
-    setups = await store.list_ifvg_setups(user_id=str(user["id"]), limit=500)
+async def ifvg_cycle_summary():
+    trades = await _ifvg_trade_rows()
+    setups = await store.list_ifvg_setups(limit=500)
     health = ifvg_service.health()
     states: dict[str, int] = {}
     for trade in trades:
@@ -832,18 +832,18 @@ async def ifvg_cycle_summary(user: dict = Depends(require_user)):
     return {"strategy_id": "IFVG_SPOT_V1_2", "cycle": {"status": health["status"], "completed_cycles": health["completed_cycles"], "scanned_symbols": health["last_run_count"], "ready_signals": health["last_entry_count"], "last_run_at": health["last_run_at"], "last_error": health["last_error"]}, "setups": {"total": len(setups), "states": {str(setup.get("state") or "UNKNOWN"): sum(1 for item in setups if str(item.get("state") or "UNKNOWN") == str(setup.get("state") or "UNKNOWN")) for setup in setups}}, "trades": {"open": sum(state in IFVG_ACTIVE_STATES for state in states for _ in range(states[state])), "closed": sum(state in IFVG_CLOSED_STATES for state in states for _ in range(states[state])), "states": states}, "paper_only": True}
 
 @app.get("/api/ifvg/trades/open")
-async def ifvg_open_trades(user: dict = Depends(require_user)):
-    rows = await _ifvg_trade_rows(str(user["id"]))
+async def ifvg_open_trades():
+    rows = await _ifvg_trade_rows()
     return [trade for trade in rows if trade.get("state") in IFVG_ACTIVE_STATES]
 
 @app.get("/api/ifvg/trades/closed")
-async def ifvg_closed_trades(user: dict = Depends(require_user)):
-    rows = await _ifvg_trade_rows(str(user["id"]))
+async def ifvg_closed_trades():
+    rows = await _ifvg_trade_rows()
     return [trade for trade in rows if trade.get("state") in IFVG_CLOSED_STATES or trade.get("closed_at")]
 
 @app.get("/api/ifvg/performance")
-async def ifvg_performance(user: dict = Depends(require_user)):
-    rows = await _ifvg_trade_rows(str(user["id"]))
+async def ifvg_performance():
+    rows = await _ifvg_trade_rows()
     closed = [trade for trade in rows if trade.get("closed_at") or trade.get("state") in IFVG_CLOSED_STATES]
     wins = sum(str(trade.get("result")) == "WIN" for trade in closed)
     losses = sum(str(trade.get("result")) == "LOSS" for trade in closed)
@@ -851,8 +851,8 @@ async def ifvg_performance(user: dict = Depends(require_user)):
     return {"strategy_id": "IFVG_SPOT_V1_2", "closed_trades": len(closed), "open_trades": sum(trade.get("state") in IFVG_ACTIVE_STATES for trade in rows), "wins": wins, "losses": losses, "win_rate_pct": round(wins / len(closed) * 100, 4) if closed else 0.0, "realized_pnl_quote": round(pnl, 8), "average_net_rr": round(sum(float(trade.get("net_rr") or 0) for trade in closed) / len(closed), 6) if closed else 0.0, "paper_only": True}
 
 @app.get("/api/trades")
-async def trades(status: str | None = None, user: dict = Depends(require_user)):
-    return await store.list_trades(status.upper() if status else None, user_id=str(user["id"]))
+async def trades(status: str | None = None):
+    return await store.list_trades(status.upper() if status else None)
 
 @app.post("/api/trades/paper")
 async def create_paper_trade(payload: TradeInput, user: dict = Depends(require_user)):
