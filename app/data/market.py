@@ -23,6 +23,9 @@ class MarketData:
         self.last_event_at: float | None = None
         self.last_ticker_at: dict[str, float] = {}
         self.last_candle_at: dict[tuple[str, str], float] = {}
+        self.last_closed_candle_time: dict[tuple[str, str], float] = {}
+        self.last_closed_received_at: dict[tuple[str, str], float] = {}
+        self.last_candle_source: dict[tuple[str, str], str] = {}
         self.last_error: str | None = None
         self.reconnect_count = 0
 
@@ -46,7 +49,12 @@ class MarketData:
             result.append(candle)
         result = [candle for candle in result if candle["closed"]]
         self.candles[(symbol, interval)].clear(); self.candles[(symbol, interval)].extend(result)
-        self.last_candle_at[(symbol, interval)] = time.time()
+        received_at = time.time()
+        self.last_candle_at[(symbol, interval)] = received_at
+        if result:
+            self.last_closed_candle_time[(symbol, interval)] = float(result[-1]["time"])
+            self.last_closed_received_at[(symbol, interval)] = received_at
+            self.last_candle_source[(symbol, interval)] = "rest"
         if result and symbol not in self.tickers:
             self.tickers[symbol] = {"symbol": symbol, "price": result[-1]["close"], "change": 0.0, "volume": result[-1]["volume"], "updated_at": result[-1]["time"]}
         return result
@@ -62,20 +70,78 @@ class MarketData:
 
     async def ensure_history(self, symbol: str, interval: str) -> list[dict[str, Any]]:
         cached = closed_candles(list(self.candles[(symbol, interval)]), interval)
-        updated_at = self.last_candle_at.get((symbol, interval), 0.0)
-        cache_fresh = updated_at > 0 and time.time() - updated_at < 90
+        closed_received_at = self.last_closed_received_at.get((symbol, interval), 0.0)
+        cache_fresh = closed_received_at > 0 and time.time() - closed_received_at < max(90, self._interval_seconds(interval))
         return cached if len(cached) >= 30 and cache_fresh else await self.load_history(symbol, interval)
+
+    def ticker_quality_snapshot(self, symbol: str, max_age_seconds: float = 45.0) -> dict[str, Any]:
+        received_at = self.last_ticker_at.get(symbol)
+        age = None if received_at is None else max(0.0, time.time() - received_at)
+        return {
+            "symbol": symbol,
+            "price_present": self.tickers.get(symbol, {}).get("price") is not None,
+            "last_received_at": received_at,
+            "age_seconds": round(age, 1) if age is not None else None,
+            "max_age_seconds": max_age_seconds,
+            "fresh": age is not None and age <= max_age_seconds and self.tickers.get(symbol, {}).get("price") is not None,
+            "reason": None if age is not None and age <= max_age_seconds and self.tickers.get(symbol, {}).get("price") is not None else "STALE_OR_MISSING_TICKER",
+        }
+
+    def data_quality_snapshot(self, symbol: str, interval: str, max_age_multiplier: float = 2.0) -> dict[str, Any]:
+        now = time.time()
+        rows = closed_candles(list(self.candles[(symbol, interval)]), interval)
+        interval_seconds = self._interval_seconds(interval)
+        last_time = float(rows[-1]["time"]) if rows else None
+        candle_age = None if last_time is None else max(0.0, now - last_time - interval_seconds)
+        last_received = self.last_closed_received_at.get((symbol, interval))
+        receive_age = None if last_received is None else max(0.0, now - last_received)
+        max_age = interval_seconds * max_age_multiplier
+        fresh = bool(rows) and candle_age is not None and candle_age <= max_age
+        return {
+            "symbol": symbol,
+            "interval": interval,
+            "rows": len(rows),
+            "last_closed_candle_time": last_time,
+            "last_closed_received_at": last_received,
+            "source": self.last_candle_source.get((symbol, interval)),
+            "candle_age_seconds": round(candle_age, 1) if candle_age is not None else None,
+            "receive_age_seconds": round(receive_age, 1) if receive_age is not None else None,
+            "max_age_seconds": max_age,
+            "fresh": fresh,
+            "reason": None if fresh else ("NO_CLOSED_CANDLE" if not rows else "STALE_CLOSED_CANDLE"),
+        }
+
+    def data_quality_vetoes(self, symbol: str, intervals: tuple[str, ...] = ("4h", "1h", "15m")) -> list[str]:
+        vetoes = []
+        for interval in intervals:
+            snapshot = self.data_quality_snapshot(symbol, interval)
+            if not snapshot["fresh"]:
+                age = snapshot["candle_age_seconds"]
+                age_text = "غير متوفرة" if age is None else f"قديمة {age:.0f} ثانية"
+                vetoes.append(f"بيانات {interval} لـ{symbol} غير صالحة: {age_text}")
+        return vetoes
 
     def health_snapshot(self) -> dict[str, Any]:
         now = time.time()
         event_age = None if self.last_event_at is None else round(max(0.0, now - self.last_event_at), 1)
         live = self._task is not None and event_age is not None and event_age < 45
+        symbol_health = {}
+        for symbol in self.symbols:
+            ticker_quality = self.ticker_quality_snapshot(symbol)
+            symbol_health[symbol] = {
+                "ticker_age_seconds": ticker_quality["age_seconds"],
+                "ticker_fresh": ticker_quality["fresh"],
+                "ticker": ticker_quality,
+                "intervals": {interval: self.data_quality_snapshot(symbol, interval) for interval in self.analysis_intervals},
+            }
         return {
             "live_feed": live,
+            "all_symbols_live": bool(symbol_health) and all(item["ticker_fresh"] for item in symbol_health.values()),
             "last_event_at": self.last_event_at,
             "last_event_age_seconds": event_age,
             "last_error": self.last_error,
             "reconnect_count": self.reconnect_count,
+            "symbols": symbol_health,
         }
 
     def subscribe(self) -> asyncio.Queue:
@@ -93,7 +159,14 @@ class MarketData:
         if self._task is None: self._task = asyncio.create_task(self._run())
 
     async def stop(self):
-        if self._task: self._task.cancel(); await asyncio.gather(self._task, return_exceptions=True)
+        task = self._task
+        self._task = None
+        if task:
+            task.cancel()
+            try:
+                await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), timeout=8)
+            except asyncio.TimeoutError:
+                log.warning("market websocket did not stop within timeout")
 
     async def _run(self):
         streams = "/".join([*(f"{s.lower()}@kline_{interval}" for s in self.symbols for interval in self.analysis_intervals), *(f"{s.lower()}@ticker" for s in self.symbols)])
@@ -127,9 +200,14 @@ class MarketData:
                         symbol, interval = k["s"], k["i"]
                         candle = {"time": int(k["t"] / 1000), "open": float(k["o"]), "high": float(k["h"]), "low": float(k["l"]), "close": float(k["c"]), "volume": float(k["v"]), "closed": bool(k["x"])}
                         cache = self.candles[(symbol, interval)]
-                        self.last_candle_at[(symbol, interval)] = time.time()
+                        received_at = time.time()
+                        self.last_candle_at[(symbol, interval)] = received_at
                         if cache and cache[-1]["time"] == candle["time"]: cache[-1] = candle
                         else: cache.append(candle)
+                        if candle["closed"]:
+                            self.last_closed_candle_time[(symbol, interval)] = float(candle["time"])
+                            self.last_closed_received_at[(symbol, interval)] = received_at
+                            self.last_candle_source[(symbol, interval)] = "websocket"
                         ticker = self.tickers.get(symbol, {})
                         if not ticker:
                             previous = cache[-2]["close"] if len(cache) > 1 else candle["close"]

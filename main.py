@@ -112,7 +112,10 @@ async def _analyze_mtf(symbol: str) -> dict:
         market.ensure_history(symbol, "15m"),
     )
     rows_by_interval = {"4h": rows_4h, "1h": rows_1h, "15m": rows_15m}
+    quality_by_interval = {interval: market.data_quality_snapshot(symbol, interval) for interval in MTF_INTERVALS}
     data_vetoes = _mtf_data_veto(rows_by_interval) if any(rows_by_interval.values()) else []
+    if any(rows_by_interval.values()):
+        data_vetoes.extend(market.data_quality_vetoes(symbol, MTF_INTERVALS))
     results = {
         "4h": analyze(symbol, rows_4h, "4h", settings.confidence_threshold, settings.minimum_rr),
         "1h": analyze(symbol, rows_1h, "1h", settings.confidence_threshold, settings.minimum_rr),
@@ -159,6 +162,7 @@ async def _analyze_mtf(symbol: str) -> dict:
         },
         "mtf_alignment": "ALIGNED" if fully_aligned else "VETO",
         "mtf_vetoes": vetoes,
+        "data_quality": quality_by_interval,
     }
     if not fully_aligned:
         entry["signal"] = "NO TRADE"
@@ -268,7 +272,10 @@ async def _scan_and_store_auto_signals() -> list[dict]:
             actual_ready = bool(result.get("ready") and result.get("signal") in ("LONG", "SHORT"))
             candidate_direction = result.get("signal") if actual_ready else result.get("bias")
             live_entry = (market.tickers.get(symbol) or {}).get("price")
+            ticker_quality = market.ticker_quality_snapshot(symbol)
             extra_blocks = [] if actual_ready else ["BASE_SIGNAL_NOT_READY"]
+            if not ticker_quality["fresh"]:
+                extra_blocks.append("STALE_OR_MISSING_LIVE_TICKER")
             age = result.get("signal_age_seconds")
             if age is not None and float(age) > settings.signal_max_age_seconds:
                 extra_blocks.append("STALE_SIGNAL")
@@ -276,7 +283,7 @@ async def _scan_and_store_auto_signals() -> list[dict]:
                 extra_blocks.append("MISSING_LIVE_TICKER")
             safety = None
             candidate = {**result, "signal": candidate_direction} if candidate_direction in ("LONG", "SHORT") else result
-            if live_entry is not None and candidate_direction in ("LONG", "SHORT"):
+            if ticker_quality["fresh"] and live_entry is not None and candidate_direction in ("LONG", "SHORT"):
                 safety = assess_entry(candidate, float(live_entry), result.get("applied_minimum_rr", settings.minimum_rr))
             if settings.weeg_shadow_mode and candidate_direction in ("LONG", "SHORT"):
                 await _record_shadow_signal(symbol, candidate, live_entry, safety, extra_blocks)
@@ -700,7 +707,7 @@ async def candles(symbol: str = "BTCUSDT", interval: str = "15m", limit: int = 2
     symbol = symbol.upper()
     if symbol not in settings.symbol_list: raise HTTPException(404, "العملة غير موجودة في القائمة")
     rows = await market.ensure_history(symbol, interval)
-    return {"symbol": symbol, "interval": interval, "candles": rows[-min(limit, 500):]}
+    return {"symbol": symbol, "interval": interval, "candles": rows[-min(limit, 500):], "data_quality": market.data_quality_snapshot(symbol, interval)}
 
 @app.get("/api/market/overview")
 async def overview(interval: str = "15m"):
@@ -712,7 +719,9 @@ async def overview(interval: str = "15m"):
                 rows = await market.ensure_history(symbol, interval)
                 result = analyze(symbol, rows, interval, settings.confidence_threshold, settings.minimum_rr)
             result["ticker"] = market.tickers.get(symbol, {})
+            result.setdefault("data_quality", market.data_quality_snapshot(symbol, interval))
             return result
+
         except Exception as exc:
             return {"symbol": symbol, "signal": "NO TRADE", "confidence": 0, "reason": str(exc), "ready": False}
     return sorted(await asyncio.gather(*(one(s) for s in settings.symbol_list)), key=lambda x: (x.get("confidence", 0), x.get("rr", 0)), reverse=True)
@@ -723,7 +732,9 @@ async def signal(symbol: str, interval: str = "15m"):
     if interval == "15m":
         return await _analyze_mtf(symbol)
     rows = await market.ensure_history(symbol, interval)
-    return analyze(symbol, rows, interval, settings.confidence_threshold, settings.minimum_rr)
+    result = analyze(symbol, rows, interval, settings.confidence_threshold, settings.minimum_rr)
+    result["data_quality"] = market.data_quality_snapshot(symbol, interval)
+    return result
 
 @app.get("/api/backtest/{symbol}")
 async def backtest(symbol: str, interval: str = "15m", limit: int = 500, user: dict = Depends(require_user)):
