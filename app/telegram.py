@@ -158,7 +158,14 @@ class TelegramBotController:
                     {"text": "Summary Cycle", "callback_data": "cycle"},
                 ],
                     [{"text": "أداء النظام", "callback_data": "performance"}],
-                    [{"text": "IFVG Spot Paper", "callback_data": "ifvg_summary"}],
+                    [
+                        {"text": "IFVG Summary Cycle", "callback_data": "ifvg_cycle"},
+                        {"text": "IFVG أداء النظام", "callback_data": "ifvg_performance"},
+                    ],
+                    [
+                        {"text": "IFVG صفقات مفتوحة", "callback_data": "ifvg_open"},
+                        {"text": "IFVG صفقات مغلقة", "callback_data": "ifvg_closed"},
+                    ],
                 [{"text": "القائمة الرئيسية", "callback_data": "menu"}],
             ]
         }
@@ -258,22 +265,59 @@ class TelegramBotController:
             )
         )
 
-    async def render_ifvg_summary(self) -> str:
+    async def render_ifvg_cycle(self) -> str:
         if not self.ifvg_service:
-            return "IFVG Spot Paper\n\nالخدمة غير مهيأة."
-        trades = await self.store.list_ifvg_trades(limit=100)
-        open_trades = [trade for trade in trades if trade.get("state") == "POSITION_OPEN"]
+            return "IFVG Spot Paper | Summary Cycle\n\nالخدمة غير مهيأة."
+        health = self.ifvg_service.health()
+        trades = await self.store.list_ifvg_trades(limit=500)
+        open_count = sum(trade.get("state") in {"ENTRY_ELIGIBLE", "ORDER_INTENT", "ORDER_SUBMITTED", "ORDER_PARTIALLY_FILLED", "ORDER_FILLED", "POSITION_OPEN"} for trade in trades)
+        closed_count = sum(bool(trade.get("closed_at")) or trade.get("state") in {"TP_FILLED", "STOP_TRIGGERED", "POSITION_CLOSED"} for trade in trades)
         return "\n".join((
-            "IFVG Spot Paper | لوحة مستقلة",
+            "IFVG Spot Paper | Summary Cycle",
             "",
-            f"الخدمة: {self.ifvg_service.health().get('status', '—')}",
-            f"التفعيل: {'نعم' if self.ifvg_service.health().get('enabled') else 'لا'}",
-            f"الصفقات المفتوحة: {len(open_trades)}",
-            f"إجمالي السجل: {len(trades)}",
-            *[f"{trade.get('symbol', '—')} | Entry {trade.get('entry_fill', '—')} | SL {trade.get('stop_price', '—')} | TP {trade.get('target_price', '—')}" for trade in open_trades[:10]],
+            f"الخدمة: {health.get('status', '—')}",
+            f"التفعيل: {'نعم' if health.get('enabled') else 'لا'}",
+            f"التخزين: {'متصل' if health.get('storage') else 'غير جاهز'}",
+            f"الدورات المكتملة: {health.get('completed_cycles', 0)}",
+            f"العملات المفحوصة في آخر دورة: {health.get('last_run_count', 0)}",
+            f"الإشارات الجاهزة في آخر دورة: {health.get('last_entry_count', 0)}",
+            f"الصفقات المفتوحة: {open_count} | المغلقة: {closed_count}",
+            f"آخر تشغيل: {health.get('last_run_at') or '—'}",
+            f"آخر خطأ: {health.get('last_error') or 'لا يوجد'}",
             "",
             "التداول ورقي فقط؛ لا توجد أوامر حقيقية.",
         ))
+
+    async def render_ifvg_open(self) -> str:
+        trades = await self.store.list_ifvg_trades(limit=500)
+        rows = [trade for trade in trades if trade.get("state") in {"ENTRY_ELIGIBLE", "ORDER_INTENT", "ORDER_SUBMITTED", "ORDER_PARTIALLY_FILLED", "ORDER_FILLED", "POSITION_OPEN"}]
+        if not rows:
+            return "IFVG Spot Paper | الصفقات المفتوحة\n\nلا توجد صفقات IFVG مفتوحة حاليًا."
+        lines = [f"IFVG Spot Paper | الصفقات المفتوحة ({len(rows)})", ""]
+        for trade in rows[:20]:
+            lines.extend((f"{trade.get('symbol', '—')} | {trade.get('state', '—')}", f"Entry: {self._price(trade.get('entry_fill') or trade.get('entry_reference'))} | SL: {self._price(trade.get('stop_price'))} | TP: {self._price(trade.get('target_price'))}", f"Net RR: {self._number(trade.get('net_rr'))} | الكمية: {self._number(trade.get('quantity'))}", ""))
+        return "\n".join(lines)
+
+    async def render_ifvg_closed(self) -> str:
+        trades = await self.store.list_ifvg_trades(limit=500)
+        rows = [trade for trade in trades if trade.get("closed_at") or trade.get("state") in {"TP_FILLED", "STOP_TRIGGERED", "POSITION_CLOSED"}]
+        if not rows:
+            return "IFVG Spot Paper | الصفقات المغلقة\n\nلا توجد صفقات IFVG مغلقة حاليًا."
+        lines = [f"IFVG Spot Paper | الصفقات المغلقة ({len(rows)})", ""]
+        for trade in rows[:20]:
+            lines.extend((f"{trade.get('symbol', '—')} | {trade.get('result', '—')}", f"السبب: {trade.get('exit_reason', '—')} | PnL: {self._number(trade.get('realized_pnl_quote'))} USDT", f"Entry: {self._price(trade.get('entry_fill'))} | Exit: {self._price(trade.get('exit_fill'))}", ""))
+        return "\n".join(lines)
+
+    async def render_ifvg_performance(self) -> str:
+        trades = await self.store.list_ifvg_trades(limit=500)
+        closed = [trade for trade in trades if trade.get("closed_at") or trade.get("state") in {"TP_FILLED", "STOP_TRIGGERED", "POSITION_CLOSED"}]
+        wins = sum(trade.get("result") == "WIN" for trade in closed)
+        losses = sum(trade.get("result") == "LOSS" for trade in closed)
+        pnl = sum(float(trade.get("realized_pnl_quote") or 0) for trade in closed)
+        return "\n".join(("IFVG Spot Paper | أداء النظام", "", f"الصفقات المغلقة: {len(closed)}", f"الفوز: {wins} | الخسارة: {losses}", f"نسبة الفوز: {(wins / len(closed) * 100) if closed else 0:.2f}%", f"PnL المحقق: {pnl:.8f} USDT", f"التفعيل: {'نعم' if self.ifvg_service and self.ifvg_service.health().get('enabled') else 'لا'}", "", "هذه إحصاءات Paper Trading وليست ضمانًا للربحية."))
+
+    async def render_ifvg_summary(self) -> str:
+        return await self.render_ifvg_cycle()
 
     async def render_performance(self) -> str:
         closed = await self.store.list_trades("CLOSED_OR_STOPPED")
@@ -309,8 +353,14 @@ class TelegramBotController:
                 return self.render_cycle()
             if callback_data == "performance":
                 return await self.render_performance()
-            if callback_data == "ifvg_summary":
-                return await self.render_ifvg_summary()
+            if callback_data == "ifvg_summary" or callback_data == "ifvg_cycle":
+                return await self.render_ifvg_cycle()
+            if callback_data == "ifvg_open":
+                return await self.render_ifvg_open()
+            if callback_data == "ifvg_closed":
+                return await self.render_ifvg_closed()
+            if callback_data == "ifvg_performance":
+                return await self.render_ifvg_performance()
             return await self.render_menu()
         except Exception as exc:
             log.warning("telegram control query failed: %s", type(exc).__name__)
@@ -335,7 +385,7 @@ class TelegramBotController:
         if command in {"/start", "/menu"}:
             await self.notifier.send_message(await self.render_menu(), self.menu_markup(), str(chat_id))
         elif command == "/ifvg":
-            await self.notifier.send_message(await self.render_ifvg_summary(), self.menu_markup(), str(chat_id))
+            await self.notifier.send_message(await self.render_ifvg_cycle(), self.menu_markup(), str(chat_id))
 
     async def run(self) -> None:
         if not self.configured:

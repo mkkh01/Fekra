@@ -804,15 +804,51 @@ async def ifvg_backtest(symbol: str, days: int = 180, user: dict = Depends(requi
     filters = await market.exchange_filters(symbol)
     return run_ifvg_backtest(symbol, dict(zip(intervals, loaded)), config=ifvg_service.config, market=filters, portfolio=ifvg_service._portfolio())
 
+IFVG_ACTIVE_STATES = {"ENTRY_ELIGIBLE", "ORDER_INTENT", "ORDER_SUBMITTED", "ORDER_PARTIALLY_FILLED", "ORDER_FILLED", "POSITION_OPEN"}
+IFVG_CLOSED_STATES = {"POSITION_CLOSED", "TP_FILLED", "STOP_TRIGGERED", "REJECTED", "AMBIGUOUS", "RECONCILIATION_REQUIRED"}
+
+async def _ifvg_trade_rows(user_id: str, limit: int = 500) -> list[dict[str, Any]]:
+    return await store.list_ifvg_trades(user_id=user_id, limit=min(max(limit, 1), 500))
+
 @app.get("/api/ifvg/summary")
 async def ifvg_summary(user: dict = Depends(require_user)):
-    trades = await store.list_ifvg_trades(user_id=str(user["id"]), limit=500)
+    trades = await _ifvg_trade_rows(str(user["id"]))
     setups = await store.list_ifvg_setups(user_id=str(user["id"]), limit=500)
     state_counts: dict[str, int] = {}
     for trade in trades:
         state = str(trade.get("state") or "UNKNOWN")
         state_counts[state] = state_counts.get(state, 0) + 1
     return {"strategy_id": "IFVG_SPOT_V1_2", "health": ifvg_service.health(), "setups": len(setups), "trades": len(trades), "trade_states": state_counts, "paper_only": True}
+
+@app.get("/api/ifvg/cycle/summary")
+async def ifvg_cycle_summary(user: dict = Depends(require_user)):
+    trades = await _ifvg_trade_rows(str(user["id"]))
+    setups = await store.list_ifvg_setups(user_id=str(user["id"]), limit=500)
+    health = ifvg_service.health()
+    states: dict[str, int] = {}
+    for trade in trades:
+        state = str(trade.get("state") or "UNKNOWN")
+        states[state] = states.get(state, 0) + 1
+    return {"strategy_id": "IFVG_SPOT_V1_2", "cycle": {"status": health["status"], "completed_cycles": health["completed_cycles"], "scanned_symbols": health["last_run_count"], "ready_signals": health["last_entry_count"], "last_run_at": health["last_run_at"], "last_error": health["last_error"]}, "setups": {"total": len(setups), "states": {str(setup.get("state") or "UNKNOWN"): sum(1 for item in setups if str(item.get("state") or "UNKNOWN") == str(setup.get("state") or "UNKNOWN")) for setup in setups}}, "trades": {"open": sum(state in IFVG_ACTIVE_STATES for state in states for _ in range(states[state])), "closed": sum(state in IFVG_CLOSED_STATES for state in states for _ in range(states[state])), "states": states}, "paper_only": True}
+
+@app.get("/api/ifvg/trades/open")
+async def ifvg_open_trades(user: dict = Depends(require_user)):
+    rows = await _ifvg_trade_rows(str(user["id"]))
+    return [trade for trade in rows if trade.get("state") in IFVG_ACTIVE_STATES]
+
+@app.get("/api/ifvg/trades/closed")
+async def ifvg_closed_trades(user: dict = Depends(require_user)):
+    rows = await _ifvg_trade_rows(str(user["id"]))
+    return [trade for trade in rows if trade.get("state") in IFVG_CLOSED_STATES or trade.get("closed_at")]
+
+@app.get("/api/ifvg/performance")
+async def ifvg_performance(user: dict = Depends(require_user)):
+    rows = await _ifvg_trade_rows(str(user["id"]))
+    closed = [trade for trade in rows if trade.get("closed_at") or trade.get("state") in IFVG_CLOSED_STATES]
+    wins = sum(str(trade.get("result")) == "WIN" for trade in closed)
+    losses = sum(str(trade.get("result")) == "LOSS" for trade in closed)
+    pnl = sum(float(trade.get("realized_pnl_quote") or 0) for trade in closed)
+    return {"strategy_id": "IFVG_SPOT_V1_2", "closed_trades": len(closed), "open_trades": sum(trade.get("state") in IFVG_ACTIVE_STATES for trade in rows), "wins": wins, "losses": losses, "win_rate_pct": round(wins / len(closed) * 100, 4) if closed else 0.0, "realized_pnl_quote": round(pnl, 8), "average_net_rr": round(sum(float(trade.get("net_rr") or 0) for trade in closed) / len(closed), 6) if closed else 0.0, "paper_only": True}
 
 @app.get("/api/trades")
 async def trades(status: str | None = None, user: dict = Depends(require_user)):

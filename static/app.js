@@ -590,6 +590,34 @@ async function loadIfvgDecision() {
   }
 }
 
+function renderIfvgDetail(title, data) {
+  const target = $('#ifvg-detail-content');
+  if (!target) return;
+  if (Array.isArray(data)) {
+    target.innerHTML = `<div class="ifvg-decision-head"><strong>${title}</strong><span>${data.length} سجل</span></div><div class="trade-table-wrap"><table><thead><tr><th>العملة</th><th>الحالة</th><th>الدخول</th><th>الوقف</th><th>الهدف</th><th>Net RR</th><th>النتيجة</th></tr></thead><tbody>${data.length ? data.map((trade) => `<tr><td>${trade.symbol || '—'}</td><td>${trade.state || '—'}</td><td>${fmt(trade.entry_fill ?? trade.entry_reference)}</td><td>${fmt(trade.stop_price)}</td><td>${fmt(trade.target_price)}</td><td>${fmt(trade.net_rr)}</td><td>${trade.result || 'قيد التشغيل'}</td></tr>`).join('') : '<tr><td colspan="7" class="neutral">لا توجد سجلات</td></tr>'}</tbody></table></div>`;
+    return;
+  }
+  const summary = Object.entries(data || {}).filter(([key]) => key !== 'health').map(([key, value]) => `<div class="ifvg-detail-row"><span>${key}</span><strong>${typeof value === 'object' ? JSON.stringify(value) : value ?? '—'}</strong></div>`).join('');
+  target.innerHTML = `<div class="ifvg-decision-head"><strong>${title}</strong></div><div class="ifvg-detail-grid">${summary || '<span class="neutral">لا توجد بيانات</span>'}</div>`;
+}
+
+async function loadIfvgView(kind) {
+  const views = {
+    cycle: ['/api/ifvg/cycle/summary', 'IFVG Summary Cycle'],
+    open: ['/api/ifvg/trades/open', 'IFVG — الصفقات المفتوحة'],
+    closed: ['/api/ifvg/trades/closed', 'IFVG — الصفقات المغلقة'],
+    performance: ['/api/ifvg/performance', 'IFVG — أداء النظام']
+  };
+  const view = views[kind];
+  if (!view) return;
+  try {
+    const data = await api(`${view[0]}?ts=${Date.now()}`);
+    renderIfvgDetail(view[1], data);
+  } catch (_) {
+    toast(`تعذر تحميل ${view[1]}`);
+  }
+}
+
 async function loadTrades(status = 'open') {
   try {
     const rows = await api(`/api/trades?status=${status === 'open' ? 'OPEN' : 'CLOSED_OR_STOPPED'}`);
@@ -677,6 +705,10 @@ $('#settings-btn').onclick = () => toast('الإعدادات تحفظ عبر Sup
 $('#explain-btn').onclick = () => toast((state.signal?.reasons || []).join(' · ') || 'لا يوجد تفسير متاح');
 $('#ifvg-refresh-btn').onclick = loadIfvgPanel;
 $('#ifvg-decision-btn').onclick = loadIfvgDecision;
+$('#ifvg-cycle-btn').onclick = () => loadIfvgView('cycle');
+$('#ifvg-open-btn').onclick = () => loadIfvgView('open');
+$('#ifvg-closed-btn').onclick = () => loadIfvgView('closed');
+$('#ifvg-performance-btn').onclick = () => loadIfvgView('performance');
 
 $$('#timeframes button').forEach((button) => button.onclick = async () => {
   $$('#timeframes button').forEach((element) => element.classList.remove('selected'));

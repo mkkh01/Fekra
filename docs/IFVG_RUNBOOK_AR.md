@@ -18,9 +18,11 @@
 
 تجمع الخدمة شموعًا مغلقة من `4h` و`1h` و`15m` و`5m`. تُستخدم الشمعة 5m المفتوحة الحالية، إن توفرت، لمرجع `next executable open` فقط، ولا تدخل في اكتشاف FVG أو inversion أو confirmation. فجوة داخل نافذة القرار تفشل مغلقًا. كل قرار يحفظ snapshot hash، نسخة الإعداد، البوابات، الحالة، وأحداث الانتقال.
 
-## الواجهات
+## الواجهات والأزرار
 
-تعرض `GET /api/ifvg/health` حالة العامل، و`GET /api/ifvg/decision/{symbol}` قرارًا تشخيصيًا لا ينشئ صفقة، و`GET /api/ifvg/setups` الإعدادات المحفوظة، و`GET /api/ifvg/trades` سجل الصفقات، و`GET /api/ifvg/trades/{trade_id}/fills` سجل الـfills، و`GET /api/ifvg/summary` ملخصًا مستقلاً. endpoint `GET /api/ifvg/backtest/{symbol}?days=180` ينزل تاريخًا paginated ويعيد نتائج Backtest تحذيرية لا تُعد دليلًا على الربحية.
+تعرض `GET /api/ifvg/health` حالة العامل، و`GET /api/ifvg/decision/{symbol}` قرارًا تشخيصيًا لا ينشئ صفقة، و`GET /api/ifvg/setups` الإعدادات المحفوظة، و`GET /api/ifvg/trades` السجل العام، و`GET /api/ifvg/trades/{trade_id}/fills` سجل الـfills، و`GET /api/ifvg/summary` ملخصًا مستقلاً. كما توجد مسارات مستقلة للأزرار: `GET /api/ifvg/cycle/summary` لـSummary Cycle، و`GET /api/ifvg/trades/open` للمفتوحة، و`GET /api/ifvg/trades/closed` للمغلقة، و`GET /api/ifvg/performance` لأداء IFVG. endpoint `GET /api/ifvg/backtest/{symbol}?days=180` ينزل تاريخًا paginated ويعيد نتائج Backtest تحذيرية لا تُعد دليلًا على الربحية.
+
+في Telegram تظهر أربعة أزرار منفصلة داخل قائمة البوت: `IFVG Summary Cycle`، و`IFVG صفقات مفتوحة`، و`IFVG صفقات مغلقة`، و`IFVG أداء النظام`. يمكن أيضًا إرسال `/ifvg` لفتح ملخص IFVG، بينما تظل أزرار Weeg القديمة مرتبطة بجداول Weeg فقط.
 
 ## مراقبة ما قبل التشغيل
 
