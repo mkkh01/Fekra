@@ -41,8 +41,13 @@ class MarketData:
                 response = await client.get(url, params={"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
                 response.raise_for_status(); rows = response.json()
         except Exception:
-            process = await asyncio.create_subprocess_exec("curl", "-sSfL", "-A", "Mozilla/5.0 Weeg/1.0", f"{url}?{params}", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, stderr = await process.communicate()
+            process = await asyncio.create_subprocess_exec("curl", "-sSfL", "--max-time", "20", "-A", "Mozilla/5.0 Weeg/1.0", f"{url}?{params}", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            try:
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=22)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                raise RuntimeError("Binance history fallback timed out")
             if process.returncode != 0: raise RuntimeError(stderr.decode(errors="ignore")[:240])
             rows = json.loads(stdout.decode())
         now = time.time()
