@@ -11,7 +11,10 @@ log = logging.getLogger("weeg.market")
 
 class MarketData:
     def __init__(self, rest_url: str, ws_url: str, symbols: list[str], analysis_interval: str = "15m", analysis_intervals: list[str] | None = None):
-        self.rest_url = rest_url.rstrip("/")
+        configured_urls = [url.strip().rstrip("/") for url in (rest_url or "").split(",") if url.strip()]
+        defaults = ["https://api.binance.com", "https://data-api.binance.vision"]
+        self.rest_urls = list(dict.fromkeys(defaults + configured_urls))
+        self.rest_url = self.rest_urls[0]
         self.ws_urls = [url.strip().rstrip("/") for url in ws_url.split(",") if url.strip()]
         self.symbols = symbols
         self.analysis_interval = analysis_interval
@@ -254,27 +257,35 @@ class MarketData:
         if now < self._rest_pause_until:
             retry = max(1, int(self._rest_pause_until - now))
             raise RuntimeError(f"BINANCE_REST_COOLDOWN:{retry}s")
-        url = f"{self.rest_url}{path}"
-        try:
-            async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
-                response = await client.get(url, params=params)
-                response.raise_for_status()
-                self._rest_last_error = None
-                return response.json()
-        except httpx.HTTPStatusError as exc:
-            status = exc.response.status_code
-            if status in {418, 429}:
-                self._rest_pause_until = time.time() + 60
-                self._rest_last_error = f"HTTP_{status}"
-                raise RuntimeError(f"BINANCE_REST_RATE_LIMITED:{status}") from exc
-            if 500 <= status < 600:
-                self._rest_pause_until = time.time() + 15
-                self._rest_last_error = f"HTTP_{status}"
-            raise
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._rest_pause_until = time.time() + 15
-            self._rest_last_error = type(exc).__name__
-            raise
+        errors: list[Exception] = []
+        rate_limited = False
+        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
+            for base_url in self.rest_urls:
+                try:
+                    response = await client.get(f"{base_url}{path}", params=params)
+                    response.raise_for_status()
+                    self.rest_url = base_url
+                    self._rest_last_error = None
+                    return response.json()
+                except httpx.HTTPStatusError as exc:
+                    errors.append(exc)
+                    status = exc.response.status_code
+                    if status in {418, 429}:
+                        rate_limited = True
+                        continue
+                    if 500 <= status < 600:
+                        continue
+                    raise
+                except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                    errors.append(exc)
+                    continue
+        if rate_limited:
+            self._rest_pause_until = time.time() + 60
+            self._rest_last_error = "ALL_ENDPOINTS_RATE_LIMITED"
+            raise RuntimeError("BINANCE_REST_RATE_LIMITED:all endpoints") from errors[-1]
+        self._rest_pause_until = time.time() + 15
+        self._rest_last_error = type(errors[-1]).__name__ if errors else "NO_ENDPOINTS"
+        raise RuntimeError(f"BINANCE_REST_UNAVAILABLE:{self._rest_last_error}") from (errors[-1] if errors else None)
 
     async def clock_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         cached = self._clock_cache
