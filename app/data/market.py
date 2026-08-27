@@ -10,12 +10,24 @@ from app.analysis.safety import closed_candles
 log = logging.getLogger("weeg.market")
 
 class MarketData:
+    @staticmethod
+    def _normalize_ws_api_url(value: str) -> str:
+        url = str(value or "").strip()
+        while url.startswith("wss://wss://"):
+            url = url[len("wss://"):]
+        while url.startswith("ws://ws://"):
+            url = url[len("ws://"):]
+        if url and not url.startswith(("ws://", "wss://")):
+            url = "wss://" + url
+        return url.rstrip("/")
+
     def __init__(self, rest_url: str, ws_url: str, symbols: list[str], analysis_interval: str = "15m", analysis_intervals: list[str] | None = None, ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3"):
         configured_urls = [url.strip().rstrip("/") for url in (rest_url or "").split(",") if url.strip()]
         defaults = ["https://api.binance.com", "https://data-api.binance.vision"]
         self.rest_urls = list(dict.fromkeys(defaults + configured_urls))
         self.rest_url = self.rest_urls[0]
-        self.ws_api_urls = [url.strip() for url in (ws_api_url or "").split(",") if url.strip()]
+        self.ws_api_urls = list(dict.fromkeys(self._normalize_ws_api_url(url) for url in (ws_api_url or "").split(",") if url.strip()))
+        self.ws_api_urls = [url for url in self.ws_api_urls if url]
         if not self.ws_api_urls:
             self.ws_api_urls = ["wss://ws-api.binance.com:443/ws-api/v3", "wss://ws-api.binance.com:9443/ws-api/v3"]
         self.ws_api_url = self.ws_api_urls[0]

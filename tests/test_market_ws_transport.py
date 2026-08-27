@@ -124,3 +124,8 @@ def test_ws_api_failover_uses_second_port(monkeypatch):
         await market.stop()
 
     asyncio.run(scenario())
+
+
+def test_ws_api_url_normalization_removes_duplicate_scheme():
+    assert MarketData._normalize_ws_api_url("wss://wss://ws-api.binance.com:443/ws-api/v3") == "wss://ws-api.binance.com:443/ws-api/v3"
+    assert MarketData._normalize_ws_api_url("ws-api.binance.com:9443/ws-api/v3") == "wss://ws-api.binance.com:9443/ws-api/v3"
