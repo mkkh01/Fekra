@@ -66,7 +66,10 @@ def test_ifvg_cycle_aggregates_exchange_info_failure():
     async def scenario():
         settings = SimpleNamespace(ifvg_symbol_list=["BTCUSDT", "ETHUSDT"], ifvg_user_id=None, ifvg_fee_bps=10.0, ifvg_spread_bps=4.0, ifvg_entry_slippage_bps=2.0, ifvg_exit_slippage_bps=2.0, ifvg_stop_slippage_bps=4.0, ifvg_latency_bps=0.0)
         service = IFVGService(settings, SimpleNamespace(), SimpleNamespace())
-        service.market.exchange_filters = lambda symbol: asyncio.sleep(0, result=_raise("418"))
+        async def failing_exchange_filters(symbol, force_refresh=False):
+            raise RuntimeError("418")
+
+        service.market.exchange_filters = failing_exchange_filters
         results = await service.run_once()
         assert len(results) == 2
         assert all(row["primary_rejection_reason"] == "EXCHANGE_INFO_UNAVAILABLE" for row in results)

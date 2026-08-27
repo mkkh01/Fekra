@@ -33,6 +33,7 @@ class MarketData:
         self._exchange_info_lock = asyncio.Lock()
         self._exchange_info_retry_after = 0.0
         self._exchange_info_last_error: str | None = None
+        self._exchange_info_last_success_at: float | None = None
         self._book_ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._clock_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -114,10 +115,16 @@ class MarketData:
             return 900
 
     async def ensure_history(self, symbol: str, interval: str) -> list[dict[str, Any]]:
+        symbol = symbol.upper()
         cached = closed_candles(list(self.candles[(symbol, interval)]), interval)
+        now = time.time()
+        interval_seconds = self._interval_seconds(interval)
+        expected_last_open = int(now // interval_seconds) * interval_seconds - interval_seconds
+        last_open = int(cached[-1]["time"]) if cached else None
         closed_received_at = self.last_closed_received_at.get((symbol, interval), 0.0)
-        cache_fresh = closed_received_at > 0 and time.time() - closed_received_at < max(90, self._interval_seconds(interval))
-        return cached if len(cached) >= 30 and cache_fresh else await self.load_history(symbol, interval)
+        cache_fresh = closed_received_at > 0 and now - closed_received_at < max(90, interval_seconds)
+        has_current_closed_candle = last_open == expected_last_open
+        return cached if len(cached) >= 30 and cache_fresh and has_current_closed_candle else await self.load_history(symbol, interval)
 
     def ticker_quality_snapshot(self, symbol: str, max_age_seconds: float = 45.0) -> dict[str, Any]:
         received_at = self.last_ticker_at.get(symbol)
@@ -159,11 +166,32 @@ class MarketData:
         }
 
     def current_open_candle(self, symbol: str, interval: str) -> dict[str, Any] | None:
-        cache = self.candles[(symbol.upper(), interval)]
+        symbol = symbol.upper()
+        cache = self.candles[(symbol, interval)]
         if not cache:
             return None
         row = dict(cache[-1])
-        return row if row.get("closed") is False else None
+        if row.get("closed") is not False:
+            return None
+        row["received_at"] = self.last_candle_at.get((symbol, interval))
+        return row
+
+    def decision_data_quality_snapshot(self, symbol: str, interval: str) -> dict[str, Any]:
+        snapshot = self.data_quality_snapshot(symbol, interval)
+        seconds = self._interval_seconds(interval)
+        now = time.time()
+        expected_last_open = int(now // seconds) * seconds - seconds
+        last_open = snapshot.get("last_closed_candle_time")
+        current = last_open is not None and int(last_open) == expected_last_open
+        received_at = snapshot.get("last_closed_received_at")
+        received_fresh = received_at is not None and now - float(received_at) <= max(90.0, 2.0 * float(seconds))
+        snapshot["expected_last_closed_candle_time"] = expected_last_open
+        snapshot["strict_current_closed_candle"] = current
+        snapshot["strict_received_fresh"] = received_fresh
+        snapshot["fresh"] = bool(snapshot.get("fresh") and current and received_fresh)
+        if not snapshot["fresh"]:
+            snapshot["reason"] = "STALE_OR_MISSING_DECISION_DATA"
+        return snapshot
 
     def data_integrity_snapshot(self, symbol: str, interval: str) -> dict[str, Any]:
         rows = closed_candles(list(self.candles[(symbol, interval)]), interval)
@@ -218,8 +246,10 @@ class MarketData:
             "reconnect_count": self.reconnect_count,
             "exchange_info": {
                 "cached_symbols": len(self._exchange_info_cache),
+                "last_success_at": self._exchange_info_last_success_at,
                 "last_error": self._exchange_info_last_error,
                 "retry_after_seconds": max(0, round(self._exchange_info_retry_after - now, 1)),
+                "fresh_for_cycle": self._exchange_info_last_success_at is not None and now - self._exchange_info_last_success_at <= 90,
             },
             "symbols": symbol_health,
         }
@@ -231,9 +261,9 @@ class MarketData:
             response.raise_for_status()
             return response.json()
 
-    async def clock_snapshot(self) -> dict[str, Any]:
+    async def clock_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         cached = self._clock_cache
-        if cached and time.time() - cached[0] < 10:
+        if not force_refresh and cached and time.time() - cached[0] < 10:
             return dict(cached[1])
         server_time = time.time()
         payload = await self._get_json("/api/v3/time", {})
@@ -267,11 +297,11 @@ class MarketData:
             "raw_filters": filters,
         }
 
-    async def exchange_filters(self, symbol: str) -> dict[str, Any]:
+    async def exchange_filters(self, symbol: str, force_refresh: bool = False) -> dict[str, Any]:
         symbol = symbol.upper()
         now = time.time()
         cached = self._exchange_info_cache.get(symbol)
-        if cached and now - cached[0] < 3600:
+        if not force_refresh and cached and now - cached[0] < 3600:
             return dict(cached[1])
         if now < self._exchange_info_retry_after:
             retry = max(1, int(self._exchange_info_retry_after - now))
@@ -279,7 +309,7 @@ class MarketData:
         async with self._exchange_info_lock:
             now = time.time()
             cached = self._exchange_info_cache.get(symbol)
-            if cached and now - cached[0] < 3600:
+            if not force_refresh and cached and now - cached[0] < 3600:
                 return dict(cached[1])
             if now < self._exchange_info_retry_after:
                 retry = max(1, int(self._exchange_info_retry_after - now))
@@ -297,9 +327,11 @@ class MarketData:
                 if not normalized:
                     raise RuntimeError("exchangeInfo returned no symbols")
                 for item_symbol, item_filters in normalized.items():
+                    item_filters["observed_at"] = received_at
                     self._exchange_info_cache[item_symbol] = (received_at, item_filters)
                 self._exchange_info_retry_after = 0.0
                 self._exchange_info_last_error = None
+                self._exchange_info_last_success_at = received_at
             except Exception as exc:
                 # Do not retry per symbol. The caller will receive a bounded, shared
                 # failure until cooldown expires, while any last-known cache remains usable.
@@ -311,10 +343,10 @@ class MarketData:
             raise RuntimeError(f"exchangeInfo missing for {symbol}")
         return dict(cached[1])
 
-    async def book_ticker(self, symbol: str) -> dict[str, Any]:
+    async def book_ticker(self, symbol: str, force_refresh: bool = False) -> dict[str, Any]:
         symbol = symbol.upper()
         cached = self._book_ticker_cache.get(symbol)
-        if cached and time.time() - cached[0] < 10:
+        if not force_refresh and cached and time.time() - cached[0] < 10:
             return dict(cached[1])
         payload = await self._get_json("/api/v3/ticker/bookTicker", {"symbol": symbol})
         normalized = {"symbol": symbol, "bid": float(payload.get("bidPrice", 0) or 0) or None, "ask": float(payload.get("askPrice", 0) or 0) or None, "bid_qty": float(payload.get("bidQty", 0) or 0), "ask_qty": float(payload.get("askQty", 0) or 0), "observed_at": time.time()}

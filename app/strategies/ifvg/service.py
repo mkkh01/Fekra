@@ -75,11 +75,11 @@ class IFVGService:
         portfolio["active_entry_notional_quote"] = used_quote
         return portfolio
 
-    async def _market_inputs(self, symbol: str) -> dict[str, Any]:
-        filters = await self.market.exchange_filters(symbol)
+    async def _market_inputs(self, symbol: str, force_exchange_refresh: bool = False) -> dict[str, Any]:
+        filters = await self.market.exchange_filters(symbol, force_refresh=force_exchange_refresh)
         inputs = dict(filters)
         try:
-            book = await self.market.book_ticker(symbol)
+            book = await self.market.book_ticker(symbol, force_refresh=True)
             inputs.update({"entry_ask": book.get("ask"), "book_ticker": book})
         except Exception as exc:
             inputs["book_ticker_error"] = type(exc).__name__
@@ -108,19 +108,21 @@ class IFVGService:
             except Exception:
                 log.exception("IFVG event callback failed")
 
-    async def scan_symbol(self, symbol: str, persist: bool = True) -> dict[str, Any]:
+    async def scan_symbol(self, symbol: str, persist: bool = True, force_exchange_refresh: bool = True, cycle_clock: dict[str, Any] | None = None) -> dict[str, Any]:
         symbol = symbol.upper()
         intervals = ("4h", "1h", "15m", "5m")
         loaded = await asyncio.gather(*(self.market.ensure_history(symbol, interval) for interval in intervals))
         rows = dict(zip(intervals, loaded))
-        market_inputs = await self._market_inputs(symbol)
+        market_inputs = await self._market_inputs(symbol, force_exchange_refresh=force_exchange_refresh)
+        market_inputs["live_decision"] = True
+        market_inputs["decision_freshness"] = {interval: self.market.decision_data_quality_snapshot(symbol, interval) for interval in intervals}
         open_5m = self.market.current_open_candle(symbol, "5m")
         if open_5m:
             market_inputs["next_5m_open"] = open_5m.get("open")
             market_inputs["next_5m_open_time"] = open_5m.get("time")
         portfolio = await self._portfolio_snapshot()
         try:
-            clock = await self.market.clock_snapshot()
+            clock = cycle_clock if cycle_clock is not None else await self.market.clock_snapshot(force_refresh=True)
             portfolio["clock_skew_ms"] = clock.get("clock_offset_ms") if clock.get("clock_skew_ok") else None
             market_inputs["clock"] = clock
         except Exception as exc:
@@ -306,21 +308,28 @@ class IFVGService:
         results = []
         if symbols:
             try:
-                # Prefetch the complete exchangeInfo map once per cache window. This
-                # prevents one request per symbol and turns a shared outage into one
-                # bounded cycle result instead of a log/request storm.
-                await self.market.exchange_filters(symbols[0])
+                # Refresh the complete exchangeInfo map at the beginning of every
+                # decision cycle. It is reused only inside this cycle.
+                await self.market.exchange_filters(symbols[0], force_refresh=True)
             except Exception as exc:
                 self.last_error = f"EXCHANGE_INFO_UNAVAILABLE:{type(exc).__name__}"
                 log.warning("IFVG cycle skipped: exchangeInfo unavailable: %s", exc)
                 results = [{"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "EXCHANGE_INFO_UNAVAILABLE", "error": type(exc).__name__} for symbol in symbols]
             else:
-                for symbol in symbols:
-                    try:
-                        results.append(await self.scan_symbol(symbol))
-                    except Exception as exc:
-                        log.warning("IFVG scan failed for %s: %s", symbol, exc)
-                        results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
+                try:
+                    cycle_clock = await self.market.clock_snapshot(force_refresh=True)
+                except Exception as exc:
+                    self.last_error = f"CLOCK_UNAVAILABLE:{type(exc).__name__}"
+                    log.warning("IFVG cycle skipped: Binance clock unavailable: %s", exc)
+                    results = [{"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "CLOCK_UNAVAILABLE", "error": type(exc).__name__} for symbol in symbols]
+                    cycle_clock = None
+                if cycle_clock is not None:
+                    for symbol in symbols:
+                        try:
+                            results.append(await self.scan_symbol(symbol, force_exchange_refresh=False, cycle_clock=cycle_clock))
+                        except Exception as exc:
+                            log.warning("IFVG scan failed for %s: %s", symbol, exc)
+                            results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
         self.last_run_at = self._iso_now()
         self.last_run_count = len(results)
         self.last_entry_count = sum(result.get("decision") == "ENTRY_ELIGIBLE" for result in results)

@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from hashlib import sha256
 import json
 import math
+import time
 from typing import Any, Iterable
 
 
@@ -323,7 +324,7 @@ def _hash_snapshot(payload: dict[str, Any]) -> str:
 
 
 FAILURE_PRIORITY = [
-    "NO_DATA", "CLOCK_SKEW_FAIL", "DATA_GAP_FAIL", "4H_BEARISH_VETO", "INVALID_STRUCTURE",
+    "NO_DATA", "STALE_DECISION_DATA", "STALE_EXCHANGE_INFO", "STALE_BOOK_TICKER", "CLOCK_UNAVAILABLE", "CLOCK_SKEW_FAIL", "DATA_GAP_FAIL", "4H_BEARISH_VETO", "INVALID_STRUCTURE",
     "INVALID_SOURCE_FVG", "INVALID_SWEEP", "INVALID_DISPLACEMENT", "NO_INVERSION", "STALE_IFVG",
     "INVALID_RETEST", "NO_CONFIRMATION", "INVALID_STOP", "NO_TARGET", "GROSS_RR_FAIL",
     "NET_RR_FAIL", "EXECUTION_COST_FAIL", "ENTRY_GAP_FAIL", "BALANCE_FAIL", "POSITION_SIZE_FAIL",
@@ -407,6 +408,24 @@ def analyze_ifvg(
     config_errors = config.validate()
     normalized = {interval: _closed_rows(rows_by_interval.get(interval, []), interval, asof) for interval in INTERVAL_SECONDS}
     quality_failures: list[str] = []
+    if market.get("live_decision"):
+        decision_freshness = market.get("decision_freshness") or {}
+        for interval in INTERVAL_SECONDS:
+            freshness = decision_freshness.get(interval)
+            if freshness is None or not freshness.get("fresh"):
+                quality_failures.append(f"STALE_DECISION_DATA_{interval}")
+        exchange_observed_at = _num(market.get("observed_at"))
+        if exchange_observed_at is None or time.time() - exchange_observed_at > 90:
+            quality_failures.append("STALE_EXCHANGE_INFO")
+        book = market.get("book_ticker") or {}
+        book_observed_at = _num(book.get("observed_at"))
+        if book_observed_at is None or time.time() - book_observed_at > 5 or _num(book.get("ask")) is None:
+            quality_failures.append("STALE_BOOK_TICKER")
+        clock = market.get("clock") or {}
+        if not clock.get("valid"):
+            quality_failures.append("CLOCK_UNAVAILABLE")
+        elif not clock.get("clock_skew_ok"):
+            quality_failures.append("CLOCK_SKEW_FAIL")
     for interval, rows in normalized.items():
         if not rows:
             quality_failures.append(f"NO_DATA_{interval}")
