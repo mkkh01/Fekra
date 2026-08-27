@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     binance_rest_url: str = "https://data-api.binance.vision"
     binance_ws_url: str = "wss://data-stream.binance.vision/stream,wss://stream.binance.us:9443/stream"
-    binance_ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3"
+    binance_ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3,wss://ws-api.binance.com:9443/ws-api/v3"
     symbols: str = ",".join(DEFAULT_SYMBOLS)
     default_interval: str = "15m"
     cors_origins: str = ""

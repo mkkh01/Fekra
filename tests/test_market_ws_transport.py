@@ -83,3 +83,44 @@ def test_ws_api_reuses_one_connection_and_serializes_requests(monkeypatch):
         await market.stop()
 
     asyncio.run(scenario())
+
+
+def test_ws_api_failover_uses_second_port(monkeypatch):
+    async def scenario():
+        import json
+        from app.data import market as market_module
+
+        market = MarketData(
+            "https://example.invalid",
+            "wss://example.invalid",
+            ["BTCUSDT"],
+            ws_api_url="wss://first.invalid/ws-api/v3,wss://second.invalid/ws-api/v3",
+        )
+        attempts = []
+
+        class FakeSocket:
+            closed = False
+
+            async def send(self, raw):
+                request = json.loads(raw)
+                self.response = {"id": request["id"], "status": 200, "result": {"serverTime": 123}}
+
+            async def recv(self):
+                return json.dumps(self.response)
+
+            async def close(self):
+                self.closed = True
+
+        async def connect(url, **kwargs):
+            attempts.append(url)
+            if "first" in url:
+                raise OSError("first port unavailable")
+            return FakeSocket()
+
+        monkeypatch.setattr(market_module.websockets, "connect", connect)
+        assert await market._ws_api_json("/api/v3/time", {}) == {"serverTime": 123}
+        assert attempts == ["wss://first.invalid/ws-api/v3", "wss://second.invalid/ws-api/v3"]
+        assert market.ws_api_url == "wss://second.invalid/ws-api/v3"
+        await market.stop()
+
+    asyncio.run(scenario())

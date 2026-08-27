@@ -15,7 +15,10 @@ class MarketData:
         defaults = ["https://api.binance.com", "https://data-api.binance.vision"]
         self.rest_urls = list(dict.fromkeys(defaults + configured_urls))
         self.rest_url = self.rest_urls[0]
-        self.ws_api_url = ws_api_url.strip() or "wss://ws-api.binance.com:443/ws-api/v3"
+        self.ws_api_urls = [url.strip() for url in (ws_api_url or "").split(",") if url.strip()]
+        if not self.ws_api_urls:
+            self.ws_api_urls = ["wss://ws-api.binance.com:443/ws-api/v3", "wss://ws-api.binance.com:9443/ws-api/v3"]
+        self.ws_api_url = self.ws_api_urls[0]
         self.ws_urls = [url.strip().rstrip("/") for url in ws_url.split(",") if url.strip()]
         self.symbols = symbols
         self.analysis_interval = analysis_interval
@@ -45,6 +48,8 @@ class MarketData:
         self._book_ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._clock_cache: tuple[float, dict[str, Any]] | None = None
         self._last_transport_source: str | None = None
+        self._ws_api_last_error: str | None = None
+        self._ws_api_last_success_at: float | None = None
 
     async def load_history(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
         rows = await self._get_json("/api/v3/klines", {"symbol": symbol.upper(), "interval": interval, "limit": min(limit, 1000)})
@@ -256,6 +261,9 @@ class MarketData:
             "last_error": self._rest_last_error,
             "last_transport_source": self._last_transport_source,
             "ws_api_url": self.ws_api_url,
+            "ws_api_urls": self.ws_api_urls,
+            "ws_api_last_error": self._ws_api_last_error,
+            "ws_api_last_success_at": self._ws_api_last_success_at,
         }
 
     @staticmethod
@@ -277,14 +285,24 @@ class MarketData:
             socket = self._ws_api_socket
             try:
                 if socket is None or getattr(socket, "closed", False):
-                    socket = await websockets.connect(
-                        self.ws_api_url,
-                        ping_interval=20,
-                        ping_timeout=20,
-                        close_timeout=5,
-                        open_timeout=15,
-                    )
-                    self._ws_api_socket = socket
+                    socket = None
+                    connection_errors: list[str] = []
+                    for candidate_url in self.ws_api_urls:
+                        try:
+                            socket = await websockets.connect(
+                                candidate_url,
+                                ping_interval=20,
+                                ping_timeout=20,
+                                close_timeout=5,
+                                open_timeout=15,
+                            )
+                            self.ws_api_url = candidate_url
+                            self._ws_api_socket = socket
+                            break
+                        except Exception as exc:
+                            connection_errors.append(f"{candidate_url}:{type(exc).__name__}")
+                    if socket is None:
+                        raise RuntimeError("BINANCE_WS_API_CONNECT_FAILED:" + ",".join(connection_errors))
                 await socket.send(json.dumps(request, separators=(",", ":")))
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
@@ -302,6 +320,8 @@ class MarketData:
                     if result is None:
                         raise RuntimeError("BINANCE_WS_API_EMPTY_RESULT")
                     self._last_transport_source = "websocket_api"
+                    self._ws_api_last_error = None
+                    self._ws_api_last_success_at = time.time()
                     self._rest_last_error = None
                     return result
                 raise RuntimeError("BINANCE_WS_API_TIMEOUT")
@@ -323,6 +343,7 @@ class MarketData:
                 return result
             except Exception as exc:
                 ws_error = exc
+                self._ws_api_last_error = f"{type(exc).__name__}: {exc}"
                 self._rest_last_error = f"WS_API:{type(exc).__name__}"
 
         now = time.time()
