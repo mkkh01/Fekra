@@ -23,7 +23,14 @@ class MarketData:
 
     def __init__(self, rest_url: str, ws_url: str, symbols: list[str], analysis_interval: str = "15m", analysis_intervals: list[str] | None = None, ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3"):
         configured_urls = [url.strip().rstrip("/") for url in (rest_url or "").split(",") if url.strip()]
-        defaults = ["https://api.binance.com", "https://data-api.binance.vision"]
+        defaults = [
+            "https://api.binance.com",
+            "https://api1.binance.com",
+            "https://api2.binance.com",
+            "https://api3.binance.com",
+            "https://api4.binance.com",
+            "https://data-api.binance.vision",
+        ]
         self.rest_urls = list(dict.fromkeys(defaults + configured_urls))
         self.rest_url = self.rest_urls[0]
         self.ws_api_urls = list(dict.fromkeys(self._normalize_ws_api_url(url) for url in (ws_api_url or "").split(",") if url.strip()))
@@ -51,6 +58,7 @@ class MarketData:
         self.last_error: str | None = None
         self.reconnect_count = 0
         self._rest_pause_until = 0.0
+        self._rest_lock = asyncio.Lock()
         self._rest_last_error: str | None = None
         self._exchange_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._exchange_info_lock = asyncio.Lock()
@@ -359,40 +367,41 @@ class MarketData:
                 self._ws_api_last_error = f"{type(exc).__name__}: {exc}"
                 self._rest_last_error = f"WS_API:{type(exc).__name__}"
 
-        now = time.time()
-        if now < self._rest_pause_until:
-            retry = max(1, int(self._rest_pause_until - now))
-            raise RuntimeError(f"BINANCE_REST_COOLDOWN:{retry}s") from ws_error
-        errors: list[Exception] = [ws_error] if ws_error else []
-        rate_limited = False
-        async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
-            for base_url in self.rest_urls:
-                try:
-                    response = await client.get(f"{base_url}{path}", params=params)
-                    response.raise_for_status()
-                    self.rest_url = base_url
-                    self._last_transport_source = f"rest:{base_url}"
-                    self._rest_last_error = None
-                    return response.json()
-                except httpx.HTTPStatusError as exc:
-                    errors.append(exc)
-                    status = exc.response.status_code
-                    if status in {418, 429}:
-                        rate_limited = True
+        async with self._rest_lock:
+            now = time.time()
+            if now < self._rest_pause_until:
+                retry = max(1, int(self._rest_pause_until - now))
+                raise RuntimeError(f"BINANCE_REST_COOLDOWN:{retry}s") from ws_error
+            errors: list[Exception] = [ws_error] if ws_error else []
+            rate_limited = False
+            async with httpx.AsyncClient(timeout=20, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
+                for base_url in self.rest_urls:
+                    try:
+                        response = await client.get(f"{base_url}{path}", params=params)
+                        response.raise_for_status()
+                        self.rest_url = base_url
+                        self._last_transport_source = f"rest:{base_url}"
+                        self._rest_last_error = None
+                        return response.json()
+                    except httpx.HTTPStatusError as exc:
+                        errors.append(exc)
+                        status = exc.response.status_code
+                        if status in {418, 429}:
+                            rate_limited = True
+                            continue
+                        if 500 <= status < 600:
+                            continue
+                        raise
+                    except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                        errors.append(exc)
                         continue
-                    if 500 <= status < 600:
-                        continue
-                    raise
-                except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                    errors.append(exc)
-                    continue
-        if rate_limited:
-            self._rest_pause_until = time.time() + 60
-            self._rest_last_error = "ALL_ENDPOINTS_RATE_LIMITED"
-            raise RuntimeError("BINANCE_REST_RATE_LIMITED:all endpoints") from errors[-1]
-        self._rest_pause_until = time.time() + 15
-        self._rest_last_error = type(errors[-1]).__name__ if errors else "NO_ENDPOINTS"
-        raise RuntimeError(f"BINANCE_REST_UNAVAILABLE:{self._rest_last_error}") from (errors[-1] if errors else None)
+            if rate_limited:
+                self._rest_pause_until = time.time() + 60
+                self._rest_last_error = "ALL_ENDPOINTS_RATE_LIMITED"
+                raise RuntimeError("BINANCE_REST_RATE_LIMITED:all endpoints") from errors[-1]
+            self._rest_pause_until = time.time() + 15
+            self._rest_last_error = type(errors[-1]).__name__ if errors else "NO_ENDPOINTS"
+            raise RuntimeError(f"BINANCE_REST_UNAVAILABLE:{self._rest_last_error}") from (errors[-1] if errors else None)
 
     async def clock_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         cached = self._clock_cache

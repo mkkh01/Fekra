@@ -43,6 +43,7 @@ class _Client:
 def test_market_rest_failover_uses_second_official_endpoint(monkeypatch):
     async def scenario():
         market = MarketData("https://data-api.binance.vision", "wss://example.invalid", ["BTCUSDT"])
+        market.rest_urls = ["https://api.binance.com", "https://data-api.binance.vision"]
 
         async def ws_unavailable(path, params):
             raise RuntimeError("offline test")
@@ -65,6 +66,7 @@ def test_market_rest_failover_uses_second_official_endpoint(monkeypatch):
 def test_market_rest_circuit_breaker_stops_after_all_endpoints_fail(monkeypatch):
     async def scenario():
         market = MarketData("https://data-api.binance.vision", "wss://example.invalid", ["BTCUSDT"])
+        market.rest_urls = ["https://api.binance.com", "https://data-api.binance.vision"]
 
         async def ws_unavailable(path, params):
             raise RuntimeError("offline test")
