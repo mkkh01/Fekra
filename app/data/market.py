@@ -30,6 +30,9 @@ class MarketData:
         self.last_error: str | None = None
         self.reconnect_count = 0
         self._exchange_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+        self._exchange_info_lock = asyncio.Lock()
+        self._exchange_info_retry_after = 0.0
+        self._exchange_info_last_error: str | None = None
         self._book_ticker_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._clock_cache: tuple[float, dict[str, Any]] | None = None
 
@@ -213,6 +216,11 @@ class MarketData:
             "last_event_age_seconds": event_age,
             "last_error": self.last_error,
             "reconnect_count": self.reconnect_count,
+            "exchange_info": {
+                "cached_symbols": len(self._exchange_info_cache),
+                "last_error": self._exchange_info_last_error,
+                "retry_after_seconds": max(0, round(self._exchange_info_retry_after - now, 1)),
+            },
             "symbols": symbol_health,
         }
 
@@ -237,21 +245,14 @@ class MarketData:
         self._clock_cache = (time.time(), snapshot)
         return dict(snapshot)
 
-    async def exchange_filters(self, symbol: str) -> dict[str, Any]:
-        symbol = symbol.upper()
-        cached = self._exchange_info_cache.get(symbol)
-        if cached and time.time() - cached[0] < 3600:
-            return dict(cached[1])
-        payload = await self._get_json("/api/v3/exchangeInfo", {"symbol": symbol})
-        item = next((row for row in payload.get("symbols", []) if row.get("symbol") == symbol), None)
-        if not item:
-            raise RuntimeError(f"exchangeInfo missing for {symbol}")
+    @staticmethod
+    def _normalize_exchange_symbol(item: dict[str, Any]) -> dict[str, Any]:
         filters = {row.get("filterType"): row for row in item.get("filters", [])}
         price_filter = filters.get("PRICE_FILTER", {})
         lot_filter = filters.get("LOT_SIZE", {})
         notional_filter = filters.get("NOTIONAL") or filters.get("MIN_NOTIONAL") or {}
-        normalized = {
-            "symbol": symbol,
+        return {
+            "symbol": item.get("symbol"),
             "status": item.get("status"),
             "base_asset": item.get("baseAsset"),
             "quote_asset": item.get("quoteAsset"),
@@ -265,8 +266,50 @@ class MarketData:
             "apply_min_to_market": notional_filter.get("applyMinToMarket"),
             "raw_filters": filters,
         }
-        self._exchange_info_cache[symbol] = (time.time(), normalized)
-        return dict(normalized)
+
+    async def exchange_filters(self, symbol: str) -> dict[str, Any]:
+        symbol = symbol.upper()
+        now = time.time()
+        cached = self._exchange_info_cache.get(symbol)
+        if cached and now - cached[0] < 3600:
+            return dict(cached[1])
+        if now < self._exchange_info_retry_after:
+            retry = max(1, int(self._exchange_info_retry_after - now))
+            raise RuntimeError(f"exchangeInfo temporarily unavailable; retry in {retry}s")
+        async with self._exchange_info_lock:
+            now = time.time()
+            cached = self._exchange_info_cache.get(symbol)
+            if cached and now - cached[0] < 3600:
+                return dict(cached[1])
+            if now < self._exchange_info_retry_after:
+                retry = max(1, int(self._exchange_info_retry_after - now))
+                raise RuntimeError(f"exchangeInfo temporarily unavailable; retry in {retry}s")
+            try:
+                # Load the complete symbol map once. Per-symbol exchangeInfo requests
+                # multiply IP load and turn a transient 418 into a 20-symbol failure storm.
+                payload = await self._get_json("/api/v3/exchangeInfo", {})
+                received_at = time.time()
+                normalized = {
+                    str(item.get("symbol")): self._normalize_exchange_symbol(item)
+                    for item in payload.get("symbols", [])
+                    if item.get("symbol")
+                }
+                if not normalized:
+                    raise RuntimeError("exchangeInfo returned no symbols")
+                for item_symbol, item_filters in normalized.items():
+                    self._exchange_info_cache[item_symbol] = (received_at, item_filters)
+                self._exchange_info_retry_after = 0.0
+                self._exchange_info_last_error = None
+            except Exception as exc:
+                # Do not retry per symbol. The caller will receive a bounded, shared
+                # failure until cooldown expires, while any last-known cache remains usable.
+                self._exchange_info_last_error = f"{type(exc).__name__}: {exc}"
+                self._exchange_info_retry_after = time.time() + 60
+                raise RuntimeError(f"exchangeInfo unavailable: {type(exc).__name__}") from exc
+        cached = self._exchange_info_cache.get(symbol)
+        if not cached:
+            raise RuntimeError(f"exchangeInfo missing for {symbol}")
+        return dict(cached[1])
 
     async def book_ticker(self, symbol: str) -> dict[str, Any]:
         symbol = symbol.upper()

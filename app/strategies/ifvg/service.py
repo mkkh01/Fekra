@@ -302,13 +302,25 @@ class IFVGService:
         return closed
 
     async def run_once(self) -> list[dict[str, Any]]:
+        symbols = list(self.settings.ifvg_symbol_list)
         results = []
-        for symbol in self.settings.ifvg_symbol_list:
+        if symbols:
             try:
-                results.append(await self.scan_symbol(symbol))
+                # Prefetch the complete exchangeInfo map once per cache window. This
+                # prevents one request per symbol and turns a shared outage into one
+                # bounded cycle result instead of a log/request storm.
+                await self.market.exchange_filters(symbols[0])
             except Exception as exc:
-                log.warning("IFVG scan failed for %s: %s", symbol, exc)
-                results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
+                self.last_error = f"EXCHANGE_INFO_UNAVAILABLE:{type(exc).__name__}"
+                log.warning("IFVG cycle skipped: exchangeInfo unavailable: %s", exc)
+                results = [{"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "EXCHANGE_INFO_UNAVAILABLE", "error": type(exc).__name__} for symbol in symbols]
+            else:
+                for symbol in symbols:
+                    try:
+                        results.append(await self.scan_symbol(symbol))
+                    except Exception as exc:
+                        log.warning("IFVG scan failed for %s: %s", symbol, exc)
+                        results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
         self.last_run_at = self._iso_now()
         self.last_run_count = len(results)
         self.last_entry_count = sum(result.get("decision") == "ENTRY_ELIGIBLE" for result in results)
