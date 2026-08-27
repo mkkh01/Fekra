@@ -10,6 +10,13 @@ import httpx
 log = logging.getLogger("weeg.telegram")
 
 
+class TelegramAPIError(RuntimeError):
+    def __init__(self, status_code: int, description: str):
+        self.status_code = status_code
+        self.description = description
+        super().__init__(f"Telegram HTTP {status_code}: {description}")
+
+
 class TelegramNotifier:
     def __init__(self, bot_token: str | None, chat_id: str | None):
         self.bot_token = (bot_token or "").strip() or None
@@ -27,10 +34,14 @@ class TelegramNotifier:
             return {"ok": False, "description": "Telegram غير مهيأ"}
         async with httpx.AsyncClient(timeout=35) as client:
             response = await client.post(self._url(method), json=payload)
-            response.raise_for_status()
+        try:
             data = response.json()
+        except ValueError:
+            data = {"description": response.text[:200]}
+        if response.status_code >= 400:
+            raise TelegramAPIError(response.status_code, str(data.get("description") or "HTTP error"))
         if not data.get("ok"):
-            raise RuntimeError(f"Telegram API {method}: {data.get('description', 'unknown error')}")
+            raise TelegramAPIError(response.status_code, str(data.get("description") or f"Telegram API {method} failed"))
         return data
 
     async def send_message(
@@ -391,9 +402,11 @@ class TelegramBotController:
         if not self.configured:
             return
         offset: int | None = None
+        retry_delay = 5
         while True:
             try:
                 updates = await self.notifier.get_updates(offset=offset, timeout=25)
+                retry_delay = 5
                 for update in updates:
                     update_id = update.get("update_id")
                     if isinstance(update_id, int):
@@ -401,6 +414,19 @@ class TelegramBotController:
                     await self.handle_update(update)
             except asyncio.CancelledError:
                 raise
+            except TelegramAPIError as exc:
+                if exc.status_code in {401, 403}:
+                    log.error("telegram controls disabled: HTTP %s (%s)", exc.status_code, exc.description)
+                    return
+                if exc.status_code == 409:
+                    retry_delay = 60
+                elif exc.status_code == 429:
+                    retry_delay = max(retry_delay, 60)
+                else:
+                    retry_delay = min(retry_delay * 2, 60)
+                log.warning("telegram controls polling failed: HTTP %s (%s); retrying in %ss", exc.status_code, exc.description, retry_delay)
+                await asyncio.sleep(retry_delay)
             except Exception as exc:
-                log.warning("telegram controls polling failed: %s", type(exc).__name__)
-                await asyncio.sleep(5)
+                retry_delay = min(retry_delay * 2, 60)
+                log.warning("telegram controls polling failed: %s; retrying in %ss", type(exc).__name__, retry_delay)
+                await asyncio.sleep(retry_delay)
