@@ -243,6 +243,7 @@ class MarketData:
             "last_event_age_seconds": event_age,
             "last_error": self.last_error,
             "reconnect_count": self.reconnect_count,
+            "transport": self.rest_health(),
             "exchange_info": {
                 "cached_symbols": len(self._exchange_info_cache),
                 "last_success_at": self._exchange_info_last_success_at,
