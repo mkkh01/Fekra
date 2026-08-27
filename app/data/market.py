@@ -29,6 +29,8 @@ class MarketData:
         self.last_candle_source: dict[tuple[str, str], str] = {}
         self.last_error: str | None = None
         self.reconnect_count = 0
+        self._rest_pause_until = 0.0
+        self._rest_last_error: str | None = None
         self._exchange_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._exchange_info_lock = asyncio.Lock()
         self._exchange_info_retry_after = 0.0
@@ -38,22 +40,7 @@ class MarketData:
         self._clock_cache: tuple[float, dict[str, Any]] | None = None
 
     async def load_history(self, symbol: str, interval: str, limit: int = 250) -> list[dict[str, Any]]:
-        url = f"{self.rest_url}/api/v3/klines"
-        params = urllib.parse.urlencode({"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
-        try:
-            async with httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
-                response = await client.get(url, params={"symbol": symbol, "interval": interval, "limit": min(limit, 1000)})
-                response.raise_for_status(); rows = response.json()
-        except Exception:
-            process = await asyncio.create_subprocess_exec("curl", "-sSfL", "--max-time", "20", "-A", "Mozilla/5.0 Weeg/1.0", f"{url}?{params}", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=22)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-                raise RuntimeError("Binance history fallback timed out")
-            if process.returncode != 0: raise RuntimeError(stderr.decode(errors="ignore")[:240])
-            rows = json.loads(stdout.decode())
+        rows = await self._get_json("/api/v3/klines", {"symbol": symbol.upper(), "interval": interval, "limit": min(limit, 1000)})
         now = time.time()
         result = []
         for r in rows:
@@ -254,12 +241,40 @@ class MarketData:
             "symbols": symbol_health,
         }
 
+    def rest_health(self) -> dict[str, Any]:
+        now = time.time()
+        return {
+            "available": now >= self._rest_pause_until,
+            "retry_after_seconds": max(0, round(self._rest_pause_until - now, 1)),
+            "last_error": self._rest_last_error,
+        }
+
     async def _get_json(self, path: str, params: dict[str, Any]) -> Any:
+        now = time.time()
+        if now < self._rest_pause_until:
+            retry = max(1, int(self._rest_pause_until - now))
+            raise RuntimeError(f"BINANCE_REST_COOLDOWN:{retry}s")
         url = f"{self.rest_url}{path}"
-        async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
-            response = await client.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
+        try:
+            async with httpx.AsyncClient(timeout=12, headers={"User-Agent": "Mozilla/5.0 Weeg/1.0", "Accept": "application/json"}) as client:
+                response = await client.get(url, params=params)
+                response.raise_for_status()
+                self._rest_last_error = None
+                return response.json()
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in {418, 429}:
+                self._rest_pause_until = time.time() + 60
+                self._rest_last_error = f"HTTP_{status}"
+                raise RuntimeError(f"BINANCE_REST_RATE_LIMITED:{status}") from exc
+            if 500 <= status < 600:
+                self._rest_pause_until = time.time() + 15
+                self._rest_last_error = f"HTTP_{status}"
+            raise
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._rest_pause_until = time.time() + 15
+            self._rest_last_error = type(exc).__name__
+            raise
 
     async def clock_snapshot(self, force_refresh: bool = False) -> dict[str, Any]:
         cached = self._clock_cache

@@ -360,6 +360,10 @@ async def _scan_and_store_auto_signals() -> list[dict]:
             asyncio.create_task(_notify_trade_opened(saved_trade))
             asyncio.create_task(_notify_telegram_trade_opened(saved_trade))
         except Exception as exc:
+            rest = market.rest_health() if hasattr(market, "rest_health") else {"available": True}
+            if not rest.get("available", True):
+                log.warning("automatic signal scan paused: Binance REST unavailable for %ss after %s", rest.get("retry_after_seconds", 0), exc)
+                break
             log.warning("auto signal scan failed for %s: %s", symbol, exc)
     return saved
 
