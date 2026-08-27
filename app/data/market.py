@@ -6,6 +6,7 @@ import httpx
 import websockets
 
 from app.analysis.safety import closed_candles
+from app.diagnostics import emit, exception_text
 
 log = logging.getLogger("weeg.market")
 
@@ -297,6 +298,7 @@ class MarketData:
         }.get(path)
 
     async def _ws_api_json(self, path: str, params: dict[str, Any]) -> Any:
+        started = time.monotonic()
         method = self._ws_method(path)
         if method is None:
             raise RuntimeError(f"NO_WS_METHOD:{path}")
@@ -342,11 +344,13 @@ class MarketData:
                         raise RuntimeError("BINANCE_WS_API_EMPTY_RESULT")
                     self._last_transport_source = "websocket_api"
                     self._ws_api_last_error = None
+                    emit(log, logging.INFO, "binance_ws_success", method=method, duration_ms=round((time.monotonic() - started) * 1000, 1), source="websocket_api")
                     self._ws_api_last_success_at = time.time()
                     self._rest_last_error = None
                     return result
                 raise RuntimeError("BINANCE_WS_API_TIMEOUT")
-            except Exception:
+            except Exception as exc:
+                emit(log, logging.WARNING, "binance_ws_failure", method=method, duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(exc))
                 if socket is not None:
                     try:
                         await socket.close()
@@ -367,7 +371,9 @@ class MarketData:
                 self._ws_api_last_error = f"{type(exc).__name__}: {exc}"
                 self._rest_last_error = f"WS_API:{type(exc).__name__}"
 
+        emit(log, logging.DEBUG, "binance_transport_ws_failed", path=path, error=exception_text(ws_error) if ws_error else None)
         async with self._rest_lock:
+            started = time.monotonic()
             now = time.time()
             if now < self._rest_pause_until:
                 retry = max(1, int(self._rest_pause_until - now))
@@ -382,6 +388,7 @@ class MarketData:
                         self.rest_url = base_url
                         self._last_transport_source = f"rest:{base_url}"
                         self._rest_last_error = None
+                        emit(log, logging.INFO, "binance_rest_success", path=path, endpoint=base_url, duration_ms=round((time.monotonic() - started) * 1000, 1))
                         return response.json()
                     except httpx.HTTPStatusError as exc:
                         errors.append(exc)
@@ -396,9 +403,11 @@ class MarketData:
                         errors.append(exc)
                         continue
             if rate_limited:
+                emit(log, logging.ERROR, "binance_rest_all_rate_limited", path=path, endpoints=len(self.rest_urls), duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(errors[-1]) if errors else None)
                 self._rest_pause_until = time.time() + 60
                 self._rest_last_error = "ALL_ENDPOINTS_RATE_LIMITED"
                 raise RuntimeError("BINANCE_REST_RATE_LIMITED:all endpoints") from errors[-1]
+            emit(log, logging.ERROR, "binance_rest_unavailable", path=path, endpoints=len(self.rest_urls), duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(errors[-1]) if errors else "NO_ENDPOINTS")
             self._rest_pause_until = time.time() + 15
             self._rest_last_error = type(errors[-1]).__name__ if errors else "NO_ENDPOINTS"
             raise RuntimeError(f"BINANCE_REST_UNAVAILABLE:{self._rest_last_error}") from (errors[-1] if errors else None)
@@ -474,10 +483,12 @@ class MarketData:
                 self._exchange_info_retry_after = 0.0
                 self._exchange_info_last_error = None
                 self._exchange_info_last_success_at = received_at
+                emit(log, logging.INFO, "exchange_info_success", symbols=len(normalized), source=self._last_transport_source)
             except Exception as exc:
                 # Do not retry per symbol. The caller will receive a bounded, shared
                 # failure until cooldown expires, while any last-known cache remains usable.
                 self._exchange_info_last_error = f"{type(exc).__name__}: {exc}"
+                emit(log, logging.ERROR, "exchange_info_failure", error=exception_text(exc), cached_symbols=len(self._exchange_info_cache), source=self._last_transport_source)
                 self._exchange_info_retry_after = time.time() + 60
                 raise RuntimeError(f"exchangeInfo unavailable: {type(exc).__name__}") from exc
         cached = self._exchange_info_cache.get(symbol)

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
+from app.diagnostics import emit, exception_text
 
 log = logging.getLogger("weeg.telegram")
 
@@ -30,6 +31,8 @@ class TelegramNotifier:
         return f"https://api.telegram.org/bot{self.bot_token}/{method}"
 
     async def _api_call(self, method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        started = asyncio.get_running_loop().time()
+        emit(log, logging.DEBUG, "telegram_request_start", method=method)
         if not self.configured:
             return {"ok": False, "description": "Telegram غير مهيأ"}
         async with httpx.AsyncClient(timeout=35) as client:
@@ -39,9 +42,12 @@ class TelegramNotifier:
         except ValueError:
             data = {"description": response.text[:200]}
         if response.status_code >= 400:
+            emit(log, logging.WARNING, "telegram_http_failure", method=method, status=response.status_code, duration_ms=round((asyncio.get_running_loop().time() - started) * 1000, 1), description=data.get("description"))
             raise TelegramAPIError(response.status_code, str(data.get("description") or "HTTP error"))
         if not data.get("ok"):
+            emit(log, logging.WARNING, "telegram_api_failure", method=method, status=response.status_code, duration_ms=round((asyncio.get_running_loop().time() - started) * 1000, 1), description=data.get("description"))
             raise TelegramAPIError(response.status_code, str(data.get("description") or f"Telegram API {method} failed"))
+        emit(log, logging.DEBUG, "telegram_request_success", method=method, status=response.status_code, duration_ms=round((asyncio.get_running_loop().time() - started) * 1000, 1))
         return data
 
     async def send_message(

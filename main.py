@@ -10,6 +10,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from app.config import get_settings
+from app.diagnostics import configure_logging, emit, exception_text
+
+configure_logging()
 from app.data.market import MarketData
 from app.analysis.engine import analyze
 from app.analysis.safety import assess_entry, candle_age_seconds, closed_candles, iso_from_epoch
@@ -22,6 +25,7 @@ from app.strategies.ifvg.service import IFVGService
 from app.strategies.ifvg.backtest import run_ifvg_backtest
 
 settings = get_settings()
+emit(logging.getLogger("weeg.startup"), logging.INFO, "startup_config", symbols=len(settings.symbol_list), ifvg_enabled=settings.ifvg_enabled, storage_configured=bool(settings.postgres_dsn or settings.supabase_auth_keys), telegram_configured=bool(settings.telegram_bot_token))
 market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["5m", "15m", "1h", "4h"], settings.binance_ws_api_url)
 store = Store(settings.database_path, settings.supabase_http_url, settings.supabase_auth_keys, settings.redis_url, settings.postgres_dsn)
 push_notifier = PushNotifier(store, settings.vapid_private_key, settings.vapid_subject)
@@ -282,6 +286,7 @@ async def _evaluate_shadow_outcomes() -> int:
 
 async def _scan_and_store_auto_signals() -> list[dict]:
     saved = []
+    emit(log, logging.INFO, "weeg_cycle_start", symbols=len(settings.symbol_list))
     ready_signals = 0
     for symbol in settings.symbol_list:
         try:
@@ -365,6 +370,7 @@ async def _scan_and_store_auto_signals() -> list[dict]:
                 log.warning("automatic signal scan paused: Binance REST unavailable for %ss after %s", rest.get("retry_after_seconds", 0), exc)
                 break
             log.warning("auto signal scan failed for %s: %s", symbol, exc)
+    emit(log, logging.INFO, "weeg_cycle_end", saved_trades=len(saved), rest_available=market.rest_health().get("available", True))
     return saved
 
 
@@ -439,6 +445,7 @@ async def _auto_signal_loop():
             cycle_state["status"] = "ERROR"
             cycle_state["last_error"] = type(exc).__name__
         cycle_finished = datetime.now(timezone.utc)
+        emit(log, logging.INFO, "weeg_cycle_complete", run_id=cycle_state["run_id"], status=cycle_state["status"], duration_seconds=round((cycle_finished - cycle_started).total_seconds(), 3), delay_seconds=delay, scanned=cycle_state["scanned_symbols"], saved=cycle_state["saved_trades"], error=cycle_state["last_error"])
         cycle_state["finished_at"] = cycle_finished.isoformat()
         cycle_state["last_run_duration_seconds"] = round((cycle_finished - cycle_started).total_seconds(), 3)
         cycle_state["next_run_at"] = (cycle_finished.timestamp() + delay)
@@ -548,7 +555,9 @@ async def _manage_open_trades():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    emit(logging.getLogger("weeg.startup"), logging.INFO, "lifespan_start")
     await store.check_persistent_storage()
+    emit(logging.getLogger("weeg.startup"), logging.INFO, "storage_check", backend=store.backend_name, persistent=store.has_persistent_storage, error=store.storage_last_error)
     await market.start()
     auto_task = asyncio.create_task(_auto_signal_loop())
     telegram_task = None

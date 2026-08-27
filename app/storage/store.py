@@ -1,4 +1,6 @@
 import asyncio
+import logging
+import time
 import json
 import sqlite3
 import uuid
@@ -7,6 +9,9 @@ from decimal import Decimal
 from typing import Any
 
 import httpx
+from app.diagnostics import emit, exception_text
+
+log = logging.getLogger("weeg.storage")
 
 
 class Store:
@@ -104,6 +109,7 @@ class Store:
             db.commit()
 
     async def _pg_query(self, query: str, params: tuple | list = (), fetch: str = "all"):
+        started = time.monotonic()
         if not self.database_url:
             return None
         try:
@@ -136,11 +142,17 @@ class Store:
 
         try:
             result = await asyncio.wait_for(asyncio.to_thread(run_query), timeout=20)
+            emit(log, logging.DEBUG, "postgres_success", fetch=fetch, duration_ms=round((time.monotonic() - started) * 1000, 1))
             return self._json_safe(result)
         except asyncio.TimeoutError as exc:
+            emit(log, logging.ERROR, "postgres_timeout", duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(exc))
             raise TimeoutError("PostgreSQL query timeout") from exc
+        except Exception as exc:
+            emit(log, logging.ERROR, "postgres_failure", duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(exc))
+            raise
 
     async def _supabase(self, table: str, method: str = "GET", params: dict | None = None, data: Any = None):
+        started = time.monotonic()
         if not (self.supabase_url and self.supabase_key):
             return None
         headers = {
@@ -149,20 +161,28 @@ class Store:
             "Content-Type": "application/json",
             "Prefer": "return=representation",
         }
-        async with httpx.AsyncClient(timeout=12) as client:
-            response = await client.request(
-                method,
-                f"{self.supabase_url.rstrip('/')}/rest/v1/{table}",
-                headers=headers,
-                params=params,
-                json=self._json_safe(data),
-            )
-            response.raise_for_status()
-            return response.json()
+        try:
+            async with httpx.AsyncClient(timeout=12) as client:
+                response = await client.request(
+                    method,
+                    f"{self.supabase_url.rstrip('/')}/rest/v1/{table}",
+                    headers=headers,
+                    params=params,
+                    json=self._json_safe(data),
+                )
+                response.raise_for_status()
+                result = response.json()
+                emit(log, logging.DEBUG, "supabase_success", table=table, method=method, duration_ms=round((time.monotonic() - started) * 1000, 1))
+                return result
+        except Exception as exc:
+            emit(log, logging.ERROR, "supabase_failure", table=table, method=method, duration_ms=round((time.monotonic() - started) * 1000, 1), error=exception_text(exc))
+            raise
 
     async def check_persistent_storage(self) -> bool:
+        started = time.monotonic()
         self.storage_last_check_at = datetime.now(timezone.utc).isoformat()
         errors = []
+        emit(log, logging.INFO, "storage_check_start", postgres_configured=bool(self.database_url), supabase_candidates=len(self.supabase_keys))
 
         if self.database_url:
             try:
@@ -170,6 +190,7 @@ class Store:
                 self.persistent_storage_ready = True
                 self.storage_last_error = None
                 self.storage_key_source = "postgres"
+                emit(log, logging.INFO, "storage_check_success", backend="postgres", duration_ms=round((time.monotonic() - started) * 1000, 1))
                 return True
             except Exception as exc:
                 errors.append(f"postgres_{type(exc).__name__}")
@@ -181,6 +202,7 @@ class Store:
                 self.persistent_storage_ready = True
                 self.storage_last_error = None
                 self.storage_key_source = f"candidate_{index + 1}"
+                emit(log, logging.INFO, "storage_check_success", backend="supabase", candidate=index + 1, duration_ms=round((time.monotonic() - started) * 1000, 1))
                 return True
             except httpx.HTTPStatusError as exc:
                 errors.append(f"supabase_http_{exc.response.status_code}")
@@ -190,6 +212,7 @@ class Store:
         self.persistent_storage_ready = False
         self.storage_key_source = None
         self.storage_last_error = ";".join(errors) or "persistent_storage_not_configured"
+        emit(log, logging.ERROR, "storage_check_failure", duration_ms=round((time.monotonic() - started) * 1000, 1), error=self.storage_last_error)
         return False
 
     async def list_trades(self, status: str | None = None, user_id: str | None = None) -> list[dict[str, Any]]:

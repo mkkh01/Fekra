@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 import logging
+import time
 import uuid
 from typing import Any, Awaitable, Callable
+from app.diagnostics import emit, exception_text
 
 from app.strategies.ifvg.engine import IFVGConfig, STRATEGY_ID, analyze_ifvg
 from app.strategies.ifvg.states import validate_transition
@@ -304,14 +306,17 @@ class IFVGService:
         return closed
 
     async def run_once(self) -> list[dict[str, Any]]:
+        started = time.monotonic()
         symbols = list(self.settings.ifvg_symbol_list)
         results = []
         self.last_error = None
+        emit(log, logging.INFO, "ifvg_cycle_start", symbols=len(symbols), enabled=getattr(self.settings, "ifvg_enabled", True), paper_only=True)
         if symbols:
             try:
                 # Refresh the complete exchangeInfo map at the beginning of every
                 # decision cycle. It is reused only inside this cycle.
                 await self.market.exchange_filters(symbols[0], force_refresh=True)
+                emit(log, logging.INFO, "ifvg_exchange_info_ready", symbols=len(symbols), source=self.market.rest_health().get("last_transport_source"))
             except Exception as exc:
                 self.last_error = f"EXCHANGE_INFO_UNAVAILABLE:{type(exc).__name__}"
                 log.warning("IFVG cycle skipped: exchangeInfo unavailable: %s", exc)
@@ -319,6 +324,7 @@ class IFVGService:
             else:
                 try:
                     cycle_clock = await self.market.clock_snapshot(force_refresh=True)
+                    emit(log, logging.INFO, "ifvg_clock_ready", valid=cycle_clock.get("valid"), skew_ok=cycle_clock.get("clock_skew_ok"), source=self.market.rest_health().get("last_transport_source"))
                 except Exception as exc:
                     self.last_error = f"CLOCK_UNAVAILABLE:{type(exc).__name__}"
                     log.warning("IFVG cycle skipped: Binance clock unavailable: %s", exc)
@@ -327,9 +333,12 @@ class IFVGService:
                 if cycle_clock is not None:
                     for symbol in symbols:
                         try:
-                            results.append(await self.scan_symbol(symbol, force_exchange_refresh=False, cycle_clock=cycle_clock))
+                            scan_result = await self.scan_symbol(symbol, force_exchange_refresh=False, cycle_clock=cycle_clock)
+                            results.append(scan_result)
+                            emit(log, logging.DEBUG, "ifvg_symbol_result", symbol=symbol, decision=scan_result.get("decision"), rejection=scan_result.get("primary_rejection_reason"))
                         except Exception as exc:
                             log.warning("IFVG scan failed for %s: %s", symbol, exc)
+                            emit(log, logging.ERROR, "ifvg_symbol_failure", symbol=symbol, error=exception_text(exc))
                             results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
         scan_errors = [str(result.get("error")) for result in results if result.get("error")]
         if scan_errors and self.last_error is None:
@@ -338,6 +347,7 @@ class IFVGService:
         self.last_run_count = len(results)
         self.last_entry_count = sum(result.get("decision") == "ENTRY_ELIGIBLE" for result in results)
         self.completed_cycles += 1
+        emit(log, logging.INFO, "ifvg_cycle_end", duration_ms=round((time.monotonic() - started) * 1000, 1), scanned=len(results), entries=self.last_entry_count, error=self.last_error)
         return results
 
     async def _scan_loop(self) -> None:
