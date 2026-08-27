@@ -26,6 +26,10 @@ def configure_logging() -> None:
     level = getattr(logging, level_name, logging.INFO)
     root = logging.getLogger()
     root.setLevel(level)
+    # httpx access logs include the full Telegram URL (and therefore the bot token).
+    # Keep application diagnostics while suppressing transport URL leakage.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     if not root.handlers:
         logging.basicConfig(
             level=level,

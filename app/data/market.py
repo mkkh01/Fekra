@@ -314,6 +314,7 @@ class MarketData:
                         try:
                             socket = await websockets.connect(
                                 candidate_url,
+                                max_size=8 * 1024 * 1024,
                                 ping_interval=20,
                                 ping_timeout=20,
                                 close_timeout=5,
@@ -503,9 +504,11 @@ class MarketData:
         # forced refresh. It avoids one request per symbol while retaining a strict
         # age gate at the decision layer.
         if cached and cached[1].get("source") == "websocket_stream" and time.time() - cached[0] <= 10:
+            emit(log, logging.DEBUG, "book_ticker_stream_used", symbol=symbol, age_ms=round((time.time() - cached[0]) * 1000, 1))
             return dict(cached[1])
         if not force_refresh and cached and time.time() - cached[0] <= 10:
             return dict(cached[1])
+        emit(log, logging.INFO, "book_ticker_api_fallback", symbol=symbol, force_refresh=force_refresh, cache_age_seconds=round(time.time() - cached[0], 2) if cached else None)
         payload = await self._get_json("/api/v3/ticker/bookTicker", {"symbol": symbol})
         if isinstance(payload, list):
             payload = next((item for item in payload if str(item.get("symbol", "")).upper() == symbol), None)
@@ -563,8 +566,9 @@ class MarketData:
                     raise RuntimeError("no Binance WebSocket URL configured")
                 base_url = self.ws_urls[candidate_index % len(self.ws_urls)]
                 url = f"{base_url}?streams={streams}"
-                async with websockets.connect(url, ping_interval=20, ping_timeout=20, close_timeout=5, open_timeout=15) as socket:
+                async with websockets.connect(url, max_size=8 * 1024 * 1024, ping_interval=20, ping_timeout=20, close_timeout=5, open_timeout=15) as socket:
                     self._socket = socket
+                    emit(log, logging.INFO, "market_stream_connected", endpoint=base_url, symbols=len(self.symbols), stream_count=len(streams.split("/")))
                     delay = 1
                     async for raw in socket:
                         payload = json.loads(raw); data = payload.get("data", {})
