@@ -34,6 +34,12 @@
 
 يجب أولًا تنفيذ `pytest -q`، ثم فحص `/api/health` و`/api/ifvg/health`. يجب أن تكون قيمة `paper_only=true` وأن تكون `order_endpoints_enabled=false`. يجب التحقق من ظهور الجداول السبعة في Supabase ومن خلو Security Advisor من التنبيهات. عند وجود `WAITING_STORAGE` أو `WAITING_CONFIGURATION` لا تُعتبر الاستراتيجية عاملة.
 
+## معالجة exchangeInfo وخطأ 418
+
+تستخدم IFVG الآن طلب `exchangeInfo` شاملًا واحدًا وتخزنه لمدة ساعة، بدل طلب endpoint منفصل لكل عملة في كل دورة. يوجد قفل يمنع الطلبات المتوازية المكررة، وcooldown مدته 60 ثانية عند فشل endpoint. عند فشل Binance تُسجّل دورة واحدة مجمعة بحالة `EXCHANGE_INFO_UNAVAILABLE` بدل إنشاء عاصفة من الأخطاء لكل رمز. يظهر عدد الرموز المخزنة وسبب الخطأ ووقت إعادة المحاولة في `market.health_snapshot().exchange_info`.
+
+هذا يعالج سبب التكرار التشغيلي في السجل، لكنه لا يتجاوز حظرًا حقيقيًا من Binance أو مشكلة اتصال الشبكة؛ عند استمرار الفشل تبقى IFVG موقوفة عن إنشاء صفقات وتظل Weeg معزولة.
+
 ## القيود المعروفة
 
 هذا الدمج يحقق محرك القرار، دورة Paper Trading، التخزين، الحجز، fills، اللوحة، الإشعارات، والـBacktest. لا يدعي أن IFVG مربحة. نتائج Backtest تحتاج لاحقًا إلى تقسيم OOS/WFA وCSCV/Reality Check أو SPA، وتسجيل كل التجارب قبل استخدامها في أي تقييم.
