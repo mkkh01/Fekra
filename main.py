@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
-from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response
+from fastapi import Depends, FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Response, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -22,7 +22,7 @@ from app.strategies.ifvg.service import IFVGService
 from app.strategies.ifvg.backtest import run_ifvg_backtest
 
 settings = get_settings()
-market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["5m", "15m", "1h", "4h"])
+market = MarketData(settings.binance_rest_url, settings.binance_ws_url, settings.symbol_list, settings.default_interval, ["5m", "15m", "1h", "4h"], settings.binance_ws_api_url)
 store = Store(settings.database_path, settings.supabase_http_url, settings.supabase_auth_keys, settings.redis_url, settings.postgres_dsn)
 push_notifier = PushNotifier(store, settings.vapid_private_key, settings.vapid_subject)
 telegram_notifier = TelegramNotifier(settings.telegram_bot_token, settings.telegram_chat_id)
@@ -551,7 +551,15 @@ async def lifespan(app: FastAPI):
     await store.check_persistent_storage()
     await market.start()
     auto_task = asyncio.create_task(_auto_signal_loop())
-    telegram_task = asyncio.create_task(telegram_bot.run()) if telegram_bot.configured else None
+    telegram_task = None
+    if telegram_bot.configured:
+        if telegram_bot.webhook_configured:
+            try:
+                await telegram_bot.configure_webhook()
+            except Exception as exc:
+                log.error("telegram webhook setup failed; polling remains disabled: %s", type(exc).__name__)
+        else:
+            telegram_task = asyncio.create_task(telegram_bot.run())
     if not store.has_persistent_storage:
         log.error("automatic signal loop waiting for persistent Supabase storage; backend=%s error=%s", store.backend_name, store.storage_last_error)
     exit_task = asyncio.create_task(_manage_open_trades())
@@ -572,6 +580,17 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Weeg Crypto Trading Intelligence", version="1.0.0", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=settings.cors_list if settings.cors_origins != "*" else ["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"])
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(request: Request):
+    if not telegram_bot.webhook_configured or not telegram_bot.configured:
+        raise HTTPException(status_code=404, detail="Telegram webhook غير مفعّل")
+    expected = str(getattr(settings, "telegram_webhook_secret", "") or "").strip()
+    if expected and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != expected:
+        raise HTTPException(status_code=403, detail="Telegram webhook secret غير صالح")
+    update = await request.json()
+    await telegram_bot.handle_update(update)
+    return {"ok": True}
 
 @app.get("/")
 async def index(): return FileResponse(Path("templates/index.html"))
@@ -634,6 +653,8 @@ async def health(response: Response):
         "storage_last_check_at": store.storage_last_check_at,
         "telegram_notifications_enabled": telegram_notifier.configured,
         "telegram_controls_enabled": telegram_bot.configured,
+        "telegram_delivery_mode": "webhook" if telegram_bot.webhook_configured else "polling",
+        "telegram_webhook_configured": telegram_bot.webhook_configured,
         "auto_signal_enabled": persistent,
         "auto_signal_storage": persistent,
         "shadow_mode": settings.weeg_shadow_mode,

@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     redis_url: str | None = None
     binance_rest_url: str = "https://data-api.binance.vision"
     binance_ws_url: str = "wss://data-stream.binance.vision/stream,wss://stream.binance.us:9443/stream"
+    binance_ws_api_url: str = "wss://ws-api.binance.com:443/ws-api/v3"
     symbols: str = ",".join(DEFAULT_SYMBOLS)
     default_interval: str = "15m"
     cors_origins: str = ""
@@ -31,6 +32,8 @@ class Settings(BaseSettings):
     vapid_subject: str = "mailto:weeg-notifications@example.com"
     telegram_bot_token: str | None = None
     telegram_chat_id: str | None = None
+    telegram_webhook_url: str | None = None
+    telegram_webhook_secret: str | None = None
     weeg_shadow_mode: bool = True
     weeg_safety_gates_enabled: bool = False
     weeg_mfe_shadow: bool = True

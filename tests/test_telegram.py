@@ -132,3 +132,40 @@ def test_controller_renders_live_prices_and_performance():
     assert "102.50" in prices
     assert "نسبة الفوز: 100.00%" in performance
     assert "إجمالي PnL المسجل: 4.0000%" in performance
+
+
+
+def test_telegram_webhook_configuration_is_explicit_and_secret_aware():
+    class WebhookSettings:
+        telegram_webhook_url = "https://fekra.example/api/telegram/webhook"
+        telegram_webhook_secret = "test-secret"
+
+    bot = TelegramBotController(
+        TelegramNotifier("token", "1503808643"),
+        FakeStore(),
+        FakeMarket(),
+        WebhookSettings(),
+        {},
+    )
+    calls = []
+
+    async def fake_api_call(method, payload):
+        calls.append((method, payload))
+        return {"ok": True}
+
+    async def scenario():
+        bot.notifier._api_call = fake_api_call
+        await bot.configure_webhook()
+
+    asyncio.run(scenario())
+    assert bot.webhook_configured is True
+    assert calls == [
+        (
+            "setWebhook",
+            {
+                "url": "https://fekra.example/api/telegram/webhook",
+                "allowed_updates": ["message", "callback_query"],
+                "secret_token": "test-secret",
+            },
+        )
+    ]

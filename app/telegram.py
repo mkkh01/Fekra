@@ -148,6 +148,18 @@ class TelegramBotController:
         self.settings = settings
         self.cycle_state = cycle_state
         self.ifvg_service: Any | None = None
+        self.webhook_configured = bool(getattr(settings, "telegram_webhook_url", None))
+
+    async def configure_webhook(self) -> None:
+        url = str(getattr(self.settings, "telegram_webhook_url", "") or "").strip()
+        if not url:
+            return
+        payload: dict[str, Any] = {"url": url, "allowed_updates": ["message", "callback_query"]}
+        secret = str(getattr(self.settings, "telegram_webhook_secret", "") or "").strip()
+        if secret:
+            payload["secret_token"] = secret
+        await self.notifier._api_call("setWebhook", payload)
+        log.info("telegram webhook configured")
 
     @property
     def configured(self) -> bool:
