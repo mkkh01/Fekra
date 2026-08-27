@@ -2,7 +2,8 @@ import asyncio
 import json
 import sqlite3
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -134,7 +135,8 @@ class Store:
                 return result
 
         try:
-            return await asyncio.wait_for(asyncio.to_thread(run_query), timeout=20)
+            result = await asyncio.wait_for(asyncio.to_thread(run_query), timeout=20)
+            return self._json_safe(result)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("PostgreSQL query timeout") from exc
 
@@ -153,7 +155,7 @@ class Store:
                 f"{self.supabase_url.rstrip('/')}/rest/v1/{table}",
                 headers=headers,
                 params=params,
-                json=data,
+                json=self._json_safe(data),
             )
             response.raise_for_status()
             return response.json()
@@ -449,9 +451,9 @@ class Store:
         if field in {"signal_reasons", "mtf_vetoes", "mtf_timeframes", "reversal_risk_components", "overextension_metrics", "blocked_reasons", "warning_reasons", "payload", "failed_gates", "metadata", "fill_model", "config_snapshot"}:
             try:
                 from psycopg.types.json import Jsonb
-                return Jsonb(value if value is not None else [])
+                return Jsonb(Store._json_safe(value if value is not None else []))
             except ImportError:
-                return json.dumps(value if value is not None else [])
+                return json.dumps(Store._json_safe(value if value is not None else []), separators=(",", ":"))
         return value
 
     async def create_shadow_signal(self, signal: dict[str, Any]) -> dict[str, Any]:
@@ -481,7 +483,7 @@ class Store:
         now = datetime.now(timezone.utc).isoformat()
         data.setdefault("created_at", now)
         with sqlite3.connect(self.db_path) as db:
-            db.execute("insert or replace into shadow_signals(id,payload,created_at) values(?,?,?)", (str(data["id"]), json.dumps(data), data["created_at"]))
+            db.execute("insert or replace into shadow_signals(id,payload,created_at) values(?,?,?)", (str(data["id"]), self._json_payload(data), data["created_at"]))
             db.commit()
         return data
 
@@ -506,7 +508,7 @@ class Store:
             if not row:
                 return None
             current = {**json.loads(row[0]), **data}
-            db.execute("update shadow_signals set payload=? where id=?", (json.dumps(current), signal_id))
+            db.execute("update shadow_signals set payload=? where id=?", (self._json_payload(current), signal_id))
             db.commit()
             return current
 
@@ -541,7 +543,7 @@ class Store:
                 raise RuntimeError("Supabase لم يُرجع الصفقة بعد الحفظ")
             return remote[0]
         with sqlite3.connect(self.db_path) as db:
-            db.execute("insert or replace into trades(id,payload,status,created_at) values(?,?,?,?)", (trade["id"], json.dumps(trade), trade.get("status", "OPEN"), trade["created_at"]))
+            db.execute("insert or replace into trades(id,payload,status,created_at) values(?,?,?,?)", (trade["id"], self._json_payload(trade), trade.get("status", "OPEN"), trade["created_at"]))
             db.commit()
         return trade
 
@@ -571,9 +573,26 @@ class Store:
             if not row:
                 return None
             trade = {**json.loads(row[0]), **patch}
-            db.execute("update trades set payload=?, status=? where id=?", (json.dumps(trade), trade.get("status", "OPEN"), trade_id))
+            db.execute("update trades set payload=?, status=? where id=?", (self._json_payload(trade), trade.get("status", "OPEN"), trade_id))
             db.commit()
             return trade
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Convert database/native values into JSON-safe primitives recursively."""
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, (uuid.UUID,)):
+            return str(value)
+        if isinstance(value, (datetime, date)):
+            return value.isoformat()
+        if isinstance(value, Decimal):
+            return str(value)
+        if isinstance(value, dict):
+            return {str(key): Store._json_safe(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [Store._json_safe(item) for item in value]
+        return str(value)
 
     @staticmethod
     def _now_iso() -> str:
@@ -581,7 +600,7 @@ class Store:
 
     @staticmethod
     def _json_payload(value: Any) -> str:
-        return json.dumps(value, separators=(",", ":"), default=str)
+        return json.dumps(Store._json_safe(value), separators=(",", ":"))
 
     async def create_ifvg_snapshot(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         data = {"id": snapshot.get("id") or str(uuid.uuid4()), "strategy_id": "IFVG_SPOT_V1_2", **snapshot}
@@ -861,9 +880,9 @@ class Store:
                 raise
         with sqlite3.connect(self.db_path) as db:
             if user_id:
-                db.execute("insert or replace into user_settings(user_id,payload,updated_at) values(?,?,?)", (user_id, json.dumps(settings), datetime.now(timezone.utc).isoformat()))
+                db.execute("insert or replace into user_settings(user_id,payload,updated_at) values(?,?,?)", (user_id, self._json_payload(settings), datetime.now(timezone.utc).isoformat()))
             else:
-                db.execute("insert or replace into settings(id,payload) values(1,?)", (json.dumps(settings),))
+                db.execute("insert or replace into settings(id,payload) values(1,?)", (self._json_payload(settings)))
             db.commit()
         return settings
 

@@ -306,6 +306,7 @@ class IFVGService:
     async def run_once(self) -> list[dict[str, Any]]:
         symbols = list(self.settings.ifvg_symbol_list)
         results = []
+        self.last_error = None
         if symbols:
             try:
                 # Refresh the complete exchangeInfo map at the beginning of every
@@ -330,6 +331,9 @@ class IFVGService:
                         except Exception as exc:
                             log.warning("IFVG scan failed for %s: %s", symbol, exc)
                             results.append({"strategy_id": STRATEGY_ID, "symbol": symbol, "decision": "REJECTED", "primary_rejection_reason": "SERVICE_ERROR", "error": type(exc).__name__})
+        scan_errors = [str(result.get("error")) for result in results if result.get("error")]
+        if scan_errors and self.last_error is None:
+            self.last_error = f"SCAN_ERRORS:{scan_errors[0]}"
         self.last_run_at = self._iso_now()
         self.last_run_count = len(results)
         self.last_entry_count = sum(result.get("decision") == "ENTRY_ELIGIBLE" for result in results)

@@ -54,5 +54,25 @@ class StorageConfigTests(unittest.TestCase):
             self.assertTrue(by_id["loss"]["closed_at"])
 
 
+    def test_store_json_safe_normalizes_native_database_values(self):
+        import uuid
+        from datetime import datetime, timezone
+        from decimal import Decimal
+
+        native_id = uuid.uuid4()
+        value = {
+            "id": native_id,
+            "created_at": datetime(2026, 8, 27, tzinfo=timezone.utc),
+            "amount": Decimal("12.3400"),
+            "nested": [{"setup_id": native_id}],
+        }
+        encoded = Store._json_payload(value)
+        decoded = json.loads(encoded)
+        self.assertEqual(decoded["id"], str(native_id))
+        self.assertEqual(decoded["created_at"], "2026-08-27T00:00:00+00:00")
+        self.assertEqual(decoded["amount"], "12.3400")
+        self.assertEqual(decoded["nested"][0]["setup_id"], str(native_id))
+
+
 if __name__ == "__main__":
     unittest.main()
