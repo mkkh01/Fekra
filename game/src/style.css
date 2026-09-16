@@ -1,0 +1,292 @@
+:root {
+  --bg: #14100c;
+  --panel: #1f1710;
+  --card: #2a2115;
+  --border: #4a3a24;
+  --text: #f0e6d2;
+  --muted: #b8a888;
+  --accent: #ffd94d;
+  --player: #0e8a74;
+  --enemy: #c0392b;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  overflow: hidden;
+}
+
+/* الشريط العلوي */
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 2px solid var(--border);
+  height: 48px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+.tb-date {
+  font-weight: bold;
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.tb-res {
+  white-space: nowrap;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+
+.tb-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border);
+}
+
+button {
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  cursor: pointer;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+button:hover {
+  border-color: var(--accent);
+}
+
+button.active {
+  background: #5a4a1f;
+  border-color: var(--accent);
+  color: #fff;
+}
+
+#seedInput {
+  width: 90px;
+  background: var(--card);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-family: inherit;
+}
+
+/* التخطيط */
+#layout {
+  display: flex;
+  height: calc(100vh - 48px - 148px);
+}
+
+#panel {
+  width: 300px;
+  min-width: 300px;
+  background: var(--panel);
+  border-inline-end: 2px solid var(--border);
+  overflow-y: auto;
+  padding: 10px;
+}
+
+#mapWrap {
+  flex: 1;
+  position: relative;
+  min-width: 0;
+}
+
+#map {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: grab;
+  touch-action: none;
+}
+
+#banner {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+#banner.hidden {
+  display: none;
+}
+
+.banner-box {
+  font-size: 34px;
+  font-weight: bold;
+  padding: 20px 40px;
+  border-radius: 12px;
+  border: 3px solid var(--accent);
+  background: rgba(20, 16, 12, 0.92);
+}
+
+.banner-box.win {
+  color: var(--accent);
+}
+
+.banner-box.lose {
+  color: #ff6b5e;
+  border-color: #ff6b5e;
+}
+
+/* البطاقات */
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+
+.card-head {
+  border-bottom: 3px solid var(--accent);
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+}
+
+.card-head h2 {
+  margin: 0;
+  font-size: 17px;
+}
+
+.card-head .sub {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.kv {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 0;
+  font-size: 14px;
+}
+
+.kv span {
+  color: var(--muted);
+}
+
+.bar-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  margin: 4px 0;
+}
+
+.bar-row span {
+  color: var(--muted);
+  min-width: 60px;
+}
+
+.bar {
+  flex: 1;
+  height: 10px;
+  background: #000;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.bar .fill {
+  height: 100%;
+}
+
+.bar .fill.ok {
+  background: #4caf50;
+}
+.bar .fill.mid {
+  background: #ff9800;
+}
+.bar .fill.low {
+  background: #f44336;
+}
+
+.btn-label {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 8px 0 4px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 6px;
+  margin: 4px 0;
+  flex-wrap: wrap;
+}
+
+.btn-row button {
+  flex: 1;
+  white-space: nowrap;
+}
+
+.btn-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 4px 0;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* الأخبار */
+#newsWrap {
+  height: 148px;
+  background: var(--panel);
+  border-top: 2px solid var(--border);
+  display: flex;
+  flex-direction: column;
+}
+
+#newsTitle {
+  padding: 4px 12px;
+  font-weight: bold;
+  color: var(--accent);
+  font-size: 14px;
+}
+
+#news {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 12px 8px;
+  font-size: 13.5px;
+  line-height: 1.9;
+}
+
+#news .n .t {
+  color: var(--muted);
+  font-size: 12px;
+  margin-inline-end: 6px;
+}
+
+#news .n.war {
+  color: #ffb3ab;
+}
+#news .n.good {
+  color: #a5e8a5;
+}
+#news .n.bad {
+  color: #ff8a80;
+  font-weight: bold;
+}
