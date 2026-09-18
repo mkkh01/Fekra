@@ -4,6 +4,7 @@
 import type { TerrainType } from '../sim/types';
 import type { Game } from '../sim/game';
 import { drawEmblem, emblemFor } from './emblems';
+import { buildWorldFX } from './worldFX';
 
 const TERRAIN_BASE: Record<TerrainType, [number, number, number]> = {
   plains: [203, 182, 121],
@@ -47,6 +48,32 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
+/** مفاتيح لون السماء عبر ساعات اليوم: [الساعة، r، g، b، الشدة] */
+const SKY_KEYS: [number, number, number, number, number][] = [
+  [0, 14, 24, 56, 0.5],
+  [4.5, 16, 28, 62, 0.45],
+  [6.5, 255, 160, 90, 0.17],
+  [8, 255, 210, 140, 0],
+  [16.5, 255, 210, 140, 0],
+  [18.5, 255, 128, 56, 0.21],
+  [20.5, 58, 44, 96, 0.32],
+  [22.5, 14, 24, 56, 0.5],
+  [24, 14, 24, 56, 0.5],
+];
+
+function skyTint(hour: number): [number, number, number, number] {
+  const h = ((hour % 24) + 24) % 24;
+  for (let i = 0; i < SKY_KEYS.length - 1; i++) {
+    const [h0, r0, g0, b0, a0] = SKY_KEYS[i];
+    const [h1, r1, g1, b1, a1] = SKY_KEYS[i + 1];
+    if (h >= h0 && h <= h1) {
+      const t = h1 === h0 ? 0 : (h - h0) / (h1 - h0);
+      return [lerp(r0, r1, t), lerp(g0, g1, t), lerp(b0, b1, t), lerp(a0, a1, t)];
+    }
+  }
+  return [0, 0, 0, 0];
+}
+
 export class MapView {
   private canvas: HTMLCanvasElement;
   private ctx: CanvasRenderingContext2D;
@@ -68,6 +95,7 @@ export class MapView {
   private washCtx: CanvasRenderingContext2D;
   private vignette: CanvasGradient | null = null;
   private grain: CanvasPattern | null = null;
+  private tintCur: [number, number, number, number] = [0, 0, 0, 0];
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -204,6 +232,7 @@ export class MapView {
     c.height = this.H * PX;
     const x2 = c.getContext('2d')!;
     const { W, H } = this;
+    const fx = buildWorldFX(W, H, g.cellTerrain);
     const isWaterAt = (x: number, y: number) =>
       x < 0 || y < 0 || x >= W || y >= H || g.cellTerrain[y * W + x] === 'water';
     for (let y = 0; y < H; y++) {
@@ -240,7 +269,7 @@ export class MapView {
               k = 0.94 + n * 0.12;
               if (n > 0.9) k = 1.12; // أعشاب متناثرة
             }
-            x2.fillStyle = rgbStr(shade(col, k));
+            x2.fillStyle = rgbStr(shade(col, k * fx.shade[i]));
             x2.fillRect(px + u, py + v, 1, 1);
           }
         }
@@ -251,6 +280,44 @@ export class MapView {
         }
       }
     }
+    // الأنهار: مسارات متصلة تتوسع عند المصب
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const rv = fx.river[y * W + x];
+        if (rv <= 0) continue;
+        const w = 1 + Math.round(rv * 2.2);
+        const px = x * PX;
+        const py = y * PX;
+        const o = (PX - w) / 2;
+        x2.fillStyle = `rgba(97,143,180,${0.75 + rv * 0.2})`;
+        x2.fillRect(px + o, py + o, w, w);
+        // وصلات لجيران الأنهار
+        if (x > 0 && fx.river[y * W + x - 1] > 0) x2.fillRect(px, py + o, PX - o + 1, w);
+        if (x + 1 < W && fx.river[y * W + x + 1] > 0) x2.fillRect(px + o, py + o, PX - o + 1, w);
+        if (y > 0 && fx.river[(y - 1) * W + x] > 0) x2.fillRect(px + o, py, w, PX - o + 1);
+        if (y + 1 < H && fx.river[(y + 1) * W + x] > 0) x2.fillRect(px + o, py + o, w, PX - o + 1);
+      }
+    }
+    // خطوط كنتور المرتفعات
+    x2.strokeStyle = 'rgba(64,44,26,0.16)';
+    x2.lineWidth = 1;
+    x2.beginPath();
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (!fx.contour[y * W + x]) continue;
+        const px = x * PX;
+        const py = y * PX;
+        if (x + 1 < W && (fx.contour[y * W + x] || fx.contour[y * W + x + 1])) {
+          x2.moveTo(px + PX, py);
+          x2.lineTo(px + PX, py + PX);
+        }
+        if (y + 1 < H && (fx.contour[y * W + x] || fx.contour[(y + 1) * W + x])) {
+          x2.moveTo(px, py + PX);
+          x2.lineTo(px + PX, py + PX);
+        }
+      }
+    }
+    x2.stroke();
     // زبد البحر على حافة الماء الملاصق لليابسة
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
@@ -428,6 +495,67 @@ export class MapView {
       ctx.restore();
     }
 
+    // ===== غيوم تزحلق ظلالها =====
+    {
+      const tn = performance.now();
+      const vis = Math.max(0, 1 - (this.tintCur[3] || 0) * 2.2);
+      if (vis > 0.05) {
+        for (let i = 0; i < 5; i++) {
+          const spd = 900000 + hash(i * 11) * 900000;
+          const rx = ((tn / spd + hash(i * 3.3)) * (mw + 260)) % (mw + 260);
+          const ry = (0.16 + 0.68 * hash(i * 7.7)) * mh;
+          const rw = s * (4 + hash(i * 5.1) * 5);
+          const gr2 = ctx.createRadialGradient(ox + rx, oy + ry, 0, ox + rx, oy + ry, rw);
+          gr2.addColorStop(0, `rgba(22,18,12,${0.11 * vis})`);
+          gr2.addColorStop(1, 'rgba(22,18,12,0)');
+          ctx.fillStyle = gr2;
+          ctx.beginPath();
+          ctx.ellipse(ox + rx, oy + ry, rw, rw * 0.42, 0, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+
+    // ===== دورة النهار/الليل: تنعيم زمني نحو لون السماء المطلوب =====
+    {
+      const target = skyTint(g.clock.hour + 0.5);
+      const c = this.tintCur;
+      const e = 0.045;
+      this.tintCur = [
+        lerp(c[0], target[0], e),
+        lerp(c[1], target[1], e),
+        lerp(c[2], target[2], e),
+        lerp(c[3], target[3], e),
+      ];
+      const [tr, tg, tb, ta] = this.tintCur;
+      if (ta > 0.008) {
+        ctx.fillStyle = `rgba(${tr | 0},${tg | 0},${tb | 0},${ta})`;
+        ctx.fillRect(ox, oy, mw, mh);
+      }
+      // أضواء المدن ليلًا
+      const nightK = Math.max(0, Math.min(1, (this.tintCur[3] - 0.17) / 0.3));
+      if (nightK > 0.03) {
+        for (const p of g.provinces) {
+          if (!p.city) continue;
+          const lx = (p.center.x + 0.5) * s + ox;
+          const ly = (p.center.y + 0.5) * s + oy - s * 0.95;
+          const rad = s * (p.city.isCapital ? 2.4 : 1.7);
+          const gl = ctx.createRadialGradient(lx, ly, 0, lx, ly, rad);
+          gl.addColorStop(0, `rgba(255,206,110,${0.62 * nightK})`);
+          gl.addColorStop(1, 'rgba(255,206,110,0)');
+          ctx.fillStyle = gl;
+          ctx.beginPath();
+          ctx.arc(lx, ly, rad, 0, Math.PI * 2);
+          ctx.fill();
+          if (s > 9) {
+            ctx.fillStyle = `rgba(255,224,150,${0.85 * nightK})`;
+            ctx.fillRect(lx - s * 0.18, ly - s * 0.1, s * 0.13, s * 0.13);
+            ctx.fillRect(lx + s * 0.06, ly + s * 0.02, s * 0.11, s * 0.11);
+          }
+        }
+      }
+    }
+
     const now = performance.now();
     const sel = g.selection;
 
@@ -558,8 +686,19 @@ export class MapView {
 
       if (moving) {
         const ang = Math.atan2(fy - cur.y, fx - cur.x);
+        // رتل مجندين يسير خلف الراية
+        for (let d = 0; d < 4; d++) {
+          const dd = (d + 0.6) * r * 0.5;
+          const bx = cx - Math.cos(ang) * dd;
+          const by = cy + s * 0.35 - Math.sin(ang) * dd * 0.4;
+          const bob = Math.sin(now / 140 + d * 1.6) * r * 0.08;
+          ctx.fillStyle = `rgba(60,44,30,${0.5 - d * 0.09})`;
+          ctx.beginPath();
+          ctx.arc(bx, by + bob, Math.max(1.2, r * 0.16), 0, Math.PI * 2);
+          ctx.fill();
+        }
         for (let d = 1; d <= 3; d++) {
-          ctx.fillStyle = `rgba(190,168,120,${0.16 - d * 0.04})`;
+          ctx.fillStyle = `rgba(190,168,120,${0.14 - d * 0.03})`;
           ctx.beginPath();
           ctx.arc(cx - Math.cos(ang) * d * r * 0.55, cy + s * 0.5 - Math.sin(ang) * d * r * 0.2, r * (0.5 - d * 0.1), 0, Math.PI * 2);
           ctx.fill();
@@ -571,6 +710,23 @@ export class MapView {
       ctx.beginPath();
       ctx.ellipse(cx, cy + r * 0.95, r * 0.95, r * 0.32, 0, 0, Math.PI * 2);
       ctx.fill();
+
+      // نار معسكر ليلية للجيش الثابت
+      const nightK2 = Math.max(0, Math.min(1, (this.tintCur[3] - 0.17) / 0.3));
+      if (!moving && nightK2 > 0.25 && r > 6) {
+        const fk = 0.6 + 0.4 * Math.sin(now / 90 + a.id);
+        const fg = ctx.createRadialGradient(cx, cy + r * 1.5, 0, cx, cy + r * 1.5, r * 1.1);
+        fg.addColorStop(0, `rgba(255,150,60,${0.5 * nightK2 * fk})`);
+        fg.addColorStop(1, 'rgba(255,150,60,0)');
+        ctx.fillStyle = fg;
+        ctx.beginPath();
+        ctx.arc(cx, cy + r * 1.5, r * 1.1, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = `rgba(255,190,90,${0.85 * nightK2})`;
+        ctx.beginPath();
+        ctx.arc(cx, cy + r * 1.4, Math.max(1, r * 0.14 * fk), 0, Math.PI * 2);
+        ctx.fill();
+      }
 
       // الدرع الوراثي بشعار الدولة
       drawEmblem(ctx, cx, cy - r * 0.15, r * 1.12, n.color, n.darkColor, em);

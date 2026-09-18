@@ -4,6 +4,7 @@ import './style.css';
 import { Game } from './sim/game';
 import { MapView } from './render/mapView';
 import { buildTopbarHTML, renderBanner, renderNews, renderPanel, updateTopbar } from './ui/ui';
+import { Sound } from './ui/sound';
 
 const SAVE_KEY = 'siyar-save-v1';
 const DEFAULT_SEED = 438921; // بذرة الوثيقة
@@ -30,6 +31,20 @@ const view = new MapView(canvas);
 view.setWorld(game.width, game.height);
 view.centerOnCell(game.provinces[game.player().capitalProvinceId].center.x, game.provinces[game.player().capitalProvinceId].center.y);
 
+const sound = new Sound();
+// أول تفاعل للمستخدم يفعّل WebAudio (سياسة المتصفحات)
+const unlockAudio = () => {
+  sound.click();
+  window.removeEventListener('pointerdown', unlockAudio);
+  window.removeEventListener('keydown', unlockAudio);
+};
+window.addEventListener('pointerdown', unlockAudio);
+window.addEventListener('keydown', unlockAudio);
+if (sound.muted) {
+  const mb = topbarEl.querySelector('[data-action="mute"]');
+  if (mb) mb.textContent = '🔇';
+}
+
 function renderUI(): void {
   updateTopbar(game, speed);
   panelEl.innerHTML = renderPanel(game);
@@ -41,6 +56,7 @@ function renderUI(): void {
 
 // النقر على الخريطة
 view.onTap = (cell) => {
+  sound.click();
   if (game.over) return;
   const pid = game.provinceAt(cell.x, cell.y);
   if (pid < 0) return;
@@ -78,6 +94,7 @@ view.onTap = (cell) => {
 document.addEventListener('click', (e) => {
   const el = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
   if (!el) return;
+  sound.click();
   const action = el.dataset.action!;
   const v = el.dataset.v;
   const id = el.dataset.id ? Number(el.dataset.id) : 0;
@@ -146,6 +163,11 @@ document.addEventListener('click', (e) => {
     case 'newarmy':
       game.foundArmy(game.player().id);
       break;
+    case 'mute': {
+      const m = sound.toggle();
+      el.textContent = m ? '🔇' : '🔊';
+      break;
+    }
   }
   renderUI();
 });
@@ -189,6 +211,7 @@ function frame(now: number): void {
     acc = 0;
   }
   view.render(game);
+  sound.update(game);
   if (dirty && now - lastUI > 300) {
     lastUI = now;
     dirty = false;

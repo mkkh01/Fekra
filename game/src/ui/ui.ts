@@ -55,6 +55,7 @@ export function buildTopbarHTML(defaultSeed: number): string {
     <button data-action="capital" title="انتقال للعاصمة">🏰</button>
     <button data-action="save" title="حفظ">💾</button>
     <button data-action="load" title="تحميل">📂</button>
+    <button data-action="mute" title="كتم/تشغيل الصوت">🔊</button>
     <span class="tb-sep"></span>
     <input id="seedInput" type="number" value="${defaultSeed}" title="بذرة العالم" />
     <button data-action="newgame" title="حملة جديدة">🆕</button>
