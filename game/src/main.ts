@@ -102,6 +102,7 @@ document.addEventListener('click', (e) => {
   switch (action) {
     case 'speed':
       speed = Number(v);
+      view.setSpeed(speed);
       break;
     case 'newgame': {
       const inp = document.getElementById('seedInput') as HTMLInputElement;
@@ -113,6 +114,7 @@ document.addEventListener('click', (e) => {
         game.provinces[game.player().capitalProvinceId].center.y,
       );
       speed = 1;
+      view.setSpeed(1);
       break;
     }
     case 'save':
@@ -178,9 +180,11 @@ document.addEventListener('keydown', (e) => {
   if (e.code === 'Space') {
     e.preventDefault();
     speed = speed === 0 ? 1 : 0;
+    view.setSpeed(speed);
     renderUI();
   } else if (e.key === '1' || e.key === '2' || e.key === '3') {
     speed = e.key === '1' ? 1 : e.key === '2' ? 2 : 4;
+    view.setSpeed(speed);
     renderUI();
   } else if (e.key === 'Escape') {
     game.selection = null;

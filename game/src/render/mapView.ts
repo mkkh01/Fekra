@@ -96,6 +96,12 @@ export class MapView {
   private vignette: CanvasGradient | null = null;
   private grain: CanvasPattern | null = null;
   private tintCur: [number, number, number, number] = [0, 0, 0, 0];
+  private simSpeed = 1;
+
+  /** يخفف وميض الليل/النهار عند السرعات العالية (اليوم يمر بثوانٍ) */
+  setSpeed(v: number): void {
+    this.simSpeed = v;
+  }
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -518,7 +524,9 @@ export class MapView {
 
     // ===== دورة النهار/الليل: تنعيم زمني نحو لون السماء المطلوب =====
     {
-      const target = skyTint(g.clock.hour + 0.5);
+      const raw = skyTint(g.clock.hour + 0.5);
+      const damp = this.simSpeed >= 4 ? 0.3 : this.simSpeed >= 2 ? 0.6 : 1;
+      const target: [number, number, number, number] = [raw[0], raw[1], raw[2], raw[3] * damp];
       const c = this.tintCur;
       const e = 0.045;
       this.tintCur = [
