@@ -21,7 +21,23 @@ npm run dev      # ثم افتح http://localhost:5173
 npm run check    # فحص TypeScript
 npm run test     # اختبارات Vitest
 npm run build    # بناء نسخة الإنتاج
+npm start        # سيرفر الإنتاج (يقدّم dist على PORT)
 ```
+
+## النشر على Render (Web Service)
+
+الإعدادات في لوحة Render:
+
+| الإعداد | القيمة |
+|---|---|
+| Repository | `mkkh01/Fekra` — فرع `main` |
+| Root Directory | `game` ⚠️ الأهم |
+| Environment | `Node` |
+| Build Command | `npm install && npm run build` |
+| Start Command | `npm start` |
+
+السيرفر (`server.js`) يستمع على `PORT` تلقائيًا ويربط `0.0.0.0` كما يتطلب Render.
+ملاحظة: الخطة المجانية تنام بعد ~15 دقيقة خمول، وأول فتح بعد النوم يأخذ ~دقيقة.
 
 ## كيف تلعب؟
 
