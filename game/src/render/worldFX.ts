@@ -10,6 +10,8 @@ export interface WorldFX {
   river: Float32Array;
   /** خط كنتور ناعم فوق المرتفعات: 1 = ارسم */
   contour: Uint8Array;
+  /** حقل الارتفاع النهائي (0..~1.1) — يُستخدم في المجسم ثلاثي الأبعاد */
+  elev: Float32Array;
 }
 
 const ELEV_BASE: Record<TerrainType, number> = {
@@ -146,5 +148,34 @@ export function buildWorldFX(
     }
   }
 
-  return { shade, river, contour };
+  return { shade, river, contour, elev };
+}
+
+/**
+ * جراح المعارك: بقع محروقة/دماء تُخبز في طبقة الأرض كلما دارت رحى حرب
+ * حول مقاطعة — تتجدد مع كل معركة وتبهت ببطء مع السنين.
+ */
+export function battleScars(
+  W: number,
+  H: number,
+  provinces: { cells: { x: number; y: number }[]; lastBattleTick: number; terrain: string }[],
+  tick: number,
+  seedSalt: number,
+): Float32Array {
+  const scar = new Float32Array(W * H);
+  for (const p of provinces) {
+    if (p.terrain === 'water') continue;
+    const age = tick - p.lastBattleTick;
+    if (age < 0 || age > 2400) continue;
+    const strength = Math.max(0, 1 - age / 2400) * Math.min(1, 0.55 + (p.cells.length % 7) * 0.08);
+    for (const c of p.cells) {
+      const h = Math.abs(Math.sin((c.x * 12.9898 + c.y * 78.233 + seedSalt) * 43758.5453));
+      const hh = h - Math.floor(h);
+      if (hh < 0.34) {
+        const i = c.y * W + c.x;
+        scar[i] = Math.min(1, scar[i] + strength * (0.35 + hh * 1.6));
+      }
+    }
+  }
+  return scar;
 }

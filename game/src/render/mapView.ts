@@ -4,7 +4,8 @@
 import type { TerrainType } from '../sim/types';
 import type { Game } from '../sim/game';
 import { drawEmblem, emblemFor } from './emblems';
-import { buildWorldFX } from './worldFX';
+import { buildWorldFX, battleScars } from './worldFX';
+import { nightAmount, skyTint } from './daylight';
 
 const TERRAIN_BASE: Record<TerrainType, [number, number, number]> = {
   plains: [203, 182, 121],
@@ -48,31 +49,7 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-/** مفاتيح لون السماء عبر ساعات اليوم: [الساعة، r، g، b، الشدة] */
-const SKY_KEYS: [number, number, number, number, number][] = [
-  [0, 14, 24, 56, 0.5],
-  [4.5, 16, 28, 62, 0.45],
-  [6.5, 255, 160, 90, 0.17],
-  [8, 255, 210, 140, 0],
-  [16.5, 255, 210, 140, 0],
-  [18.5, 255, 128, 56, 0.21],
-  [20.5, 58, 44, 96, 0.32],
-  [22.5, 14, 24, 56, 0.5],
-  [24, 14, 24, 56, 0.5],
-];
 
-function skyTint(hour: number): [number, number, number, number] {
-  const h = ((hour % 24) + 24) % 24;
-  for (let i = 0; i < SKY_KEYS.length - 1; i++) {
-    const [h0, r0, g0, b0, a0] = SKY_KEYS[i];
-    const [h1, r1, g1, b1, a1] = SKY_KEYS[i + 1];
-    if (h >= h0 && h <= h1) {
-      const t = h1 === h0 ? 0 : (h - h0) / (h1 - h0);
-      return [lerp(r0, r1, t), lerp(g0, g1, t), lerp(b0, b1, t), lerp(a0, a1, t)];
-    }
-  }
-  return [0, 0, 0, 0];
-}
 
 export class MapView {
   private canvas: HTMLCanvasElement;
@@ -97,6 +74,8 @@ export class MapView {
   private grain: CanvasPattern | null = null;
   private tintCur: [number, number, number, number] = [0, 0, 0, 0];
   private simSpeed = 1;
+  private scars: Float32Array | null = null;
+  private scarDay = -1;
 
   /** يخفف وميض الليل/النهار عند السرعات العالية (اليوم يمر بثوانٍ) */
   setSpeed(v: number): void {
@@ -403,6 +382,26 @@ export class MapView {
     ctx.drawImage(this.wash, ox, oy, mw, mh);
     ctx.globalAlpha = 1;
 
+    // جراح المعارك: دماء وندوب حرقت تُوشم الأرض وتبهت مع السنين
+    {
+      const dayKey = Math.floor(g.tick / 12);
+      if (this.scarDay !== dayKey || !this.scars) {
+        this.scarDay = dayKey;
+        this.scars = battleScars(W, H, g.provinces, g.tick, g.seed % 97);
+      }
+      if (this.scars) {
+        for (let i = 0; i < W * H; i++) {
+          const v = this.scars[i];
+          if (v <= 0.02) continue;
+          const gx = i % W;
+          const gy = (i / W) | 0;
+          const h = hash(i * 1.37);
+          ctx.fillStyle = h > 0.5 ? `rgba(112,24,18,${0.2 * v})` : `rgba(46,34,24,${0.26 * v})`;
+          ctx.fillRect(gx * s + ox, gy * s + oy, s + 0.5, s + 0.5);
+        }
+      }
+    }
+
     // وميض الاشتباك فوق الخلايا المتحارب بها
     for (const p of g.provinces) {
       const age = g.tick - p.lastBattleTick;
@@ -541,7 +540,7 @@ export class MapView {
         ctx.fillRect(ox, oy, mw, mh);
       }
       // أضواء المدن ليلًا
-      const nightK = Math.max(0, Math.min(1, (this.tintCur[3] - 0.17) / 0.3));
+      const nightK = nightAmount(this.tintCur[3]);
       if (nightK > 0.03) {
         for (const p of g.provinces) {
           if (!p.city) continue;
@@ -720,7 +719,7 @@ export class MapView {
       ctx.fill();
 
       // نار معسكر ليلية للجيش الثابت
-      const nightK2 = Math.max(0, Math.min(1, (this.tintCur[3] - 0.17) / 0.3));
+      const nightK2 = nightAmount(this.tintCur[3]);
       if (!moving && nightK2 > 0.25 && r > 6) {
         const fk = 0.6 + 0.4 * Math.sin(now / 90 + a.id);
         const fg = ctx.createRadialGradient(cx, cy + r * 1.5, 0, cx, cy + r * 1.5, r * 1.1);

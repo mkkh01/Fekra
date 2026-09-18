@@ -52,6 +52,7 @@ export function buildTopbarHTML(defaultSeed: number): string {
       <button data-action="speed" data-v="4" title="سرعة ×4">⏭️</button>
     </span>
     <span class="tb-sep"></span>
+    <button data-action="mode" title="تبديل العرض ثلاثي/مسطح">🧊</button>
     <button data-action="capital" title="انتقال للعاصمة">🏰</button>
     <button data-action="save" title="حفظ">💾</button>
     <button data-action="load" title="تحميل">📂</button>
