@@ -3,6 +3,7 @@
 
 import type { TerrainType } from '../sim/types';
 import type { Game } from '../sim/game';
+import { drawEmblem, emblemFor } from './emblems';
 
 const TERRAIN_BASE: Record<TerrainType, [number, number, number]> = {
   plains: [203, 182, 121],
@@ -66,6 +67,7 @@ export class MapView {
   private wash: HTMLCanvasElement;
   private washCtx: CanvasRenderingContext2D;
   private vignette: CanvasGradient | null = null;
+  private grain: CanvasPattern | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
@@ -223,7 +225,7 @@ export class MapView {
             if (t === 'water') {
               const depth = Math.min(1, (waterNeighbors / 5) * 0.9 + n * 0.12);
               col = [lerp(96, 36, depth), lerp(150, 66, depth), lerp(178, 96, depth)];
-              if (n > 0.93 && depth < 0.55) k = 1.5; // بريق موج
+              if (n > 0.94 && depth > 0.55) k = 1.3; // بريق خفيف في أعالي البحار فقط
             } else if (t === 'forest') {
               k = 0.8 + n * 0.34;
               if (n > 0.72) col = [60 + n * 26, 96 + n * 20, 48 + n * 14]; // ظلال تيجان
@@ -291,8 +293,11 @@ export class MapView {
     wc.clearRect(0, 0, W, H);
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const owner = g.provinces[g.cellProvince[y * W + x]].ownerId;
+        const i = y * W + x;
+        const owner = g.provinces[g.cellProvince[i]].ownerId;
         if (owner < 0) continue;
+        // لا يسكب لون الدولة فوق الماء — البحيرات والنور تبقى ماءً صافيًا
+        if (g.cellTerrain[i] === 'water') continue;
         wc.fillStyle = g.nation(owner).color;
         wc.fillRect(x, y, 1, 1);
       }
@@ -403,6 +408,26 @@ export class MapView {
     ctx.fillStyle = this.vignette;
     ctx.fillRect(0, 0, this.cw, this.ch);
 
+    // حبيبات ورق خفيفة فوق الخريطة — إحساس المخطوطة المرسومة يدويًا
+    if (!this.grain) {
+      const gc = document.createElement('canvas');
+      gc.width = gc.height = 96;
+      const gx = gc.getContext('2d')!;
+      for (let i2 = 0; i2 < 1400; i2++) {
+        const v = hash(i2 * 3.7);
+        gx.fillStyle = `rgba(${v > 0.5 ? 255 : 0},${v > 0.5 ? 245 : 10},${v > 0.5 ? 225 : 0},${0.05 + v * 0.05})`;
+        gx.fillRect(Math.floor(hash(i2 * 1.13) * 96), Math.floor(hash(i2 * 7.31) * 96), 1, 1);
+      }
+      this.grain = ctx.createPattern(gc, 'repeat');
+    }
+    if (this.grain) {
+      ctx.save();
+      ctx.globalAlpha = 0.5;
+      ctx.fillStyle = this.grain;
+      ctx.fillRect(ox, oy, mw, mh);
+      ctx.restore();
+    }
+
     const now = performance.now();
     const sel = g.selection;
 
@@ -434,7 +459,7 @@ export class MapView {
       if (p.city) {
         const byy = cy - s * 0.95;
         if (p.city.isCapital) {
-          const pr = s * (1.25 + 0.08 * Math.sin(now / 520));
+          const pr = s * (1.5 + 0.1 * Math.sin(now / 520));
           const gr = ctx.createRadialGradient(cx, byy, s * 0.2, cx, byy, pr);
           gr.addColorStop(0, 'rgba(255,214,110,0.5)');
           gr.addColorStop(1, 'rgba(255,214,110,0)');
@@ -442,17 +467,18 @@ export class MapView {
           ctx.beginPath();
           ctx.arc(cx, byy, pr, 0, Math.PI * 2);
           ctx.fill();
-          const r = Math.max(4, s * 0.34);
-          ctx.fillStyle = '#ffd94d';
-          ctx.beginPath();
-          ctx.arc(cx, byy, r, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.lineWidth = 1.5;
-          ctx.strokeStyle = '#241610';
-          ctx.stroke();
-          if (s > 6) {
-            ctx.font = `${Math.max(9, s * 0.7)}px sans-serif`;
-            ctx.fillText('👑', cx, byy - r - s * 0.2);
+          const r = Math.max(5.5, s * 0.52);
+          const own = p.ownerId >= 0 ? g.nation(p.ownerId) : null;
+          drawEmblem(ctx, cx, byy - s * 0.1, r, own?.color ?? '#c9a227', own?.darkColor ?? '#5a4410', emblemFor(own?.id ?? 0));
+          ctx.font = `${Math.max(9, r * 0.85)}px sans-serif`;
+          ctx.fillText('👑', cx, byy - r * 1.35);
+          if (own && s > 15) {
+            ctx.font = `bold ${Math.max(9, s * 0.5)}px sans-serif`;
+            ctx.lineWidth = 3;
+            ctx.strokeStyle = 'rgba(26,16,8,0.9)';
+            ctx.strokeText(own.name, cx, byy + r * 1.9);
+            ctx.fillStyle = '#ffe9a8';
+            ctx.fillText(own.name, cx, byy + r * 1.9);
           }
         } else {
           const r = Math.max(3, s * 0.3);
@@ -502,9 +528,13 @@ export class MapView {
       }
     }
 
-    // ===== الجيوش: مواقع ملساء + رايات + غبار المسير =====
+    // ===== الجيوش: دروع شعارات الدول + مواقع ملساء + تراكم التلال =====
+    const stackTotals = new Map<number, number>();
+    for (const a of g.armies) stackTotals.set(a.provinceId, (stackTotals.get(a.provinceId) ?? 0) + 1);
+    const stackIdx = new Map<number, number>();
     for (const a of g.armies) {
       const n = g.nation(a.nationId);
+      const em = emblemFor(n.id);
       const cur = g.provinces[a.provinceId].center;
       let fx = cur.x;
       let fy = cur.y;
@@ -514,9 +544,17 @@ export class MapView {
         fx = lerp(cur.x, nxt.x, Math.min(1, a.progress));
         fy = lerp(cur.y, nxt.y, Math.min(1, a.progress));
       }
-      const cx = (fx + 0.5) * s + ox;
+      // تراكم: توزيع التلال أفقيًا عند التكبير الكافي (المتحركة تبقى في مسارها)
+      let off = 0;
+      if (!moving && (stackTotals.get(a.provinceId) ?? 1) > 1 && s > 13) {
+        const cnt = stackTotals.get(a.provinceId)!;
+        const k = stackIdx.get(a.provinceId) ?? 0;
+        stackIdx.set(a.provinceId, k + 1);
+        off = (k - (cnt - 1) / 2) * s * 1.9;
+      }
+      const cx = (fx + 0.5) * s + ox + off;
       const cy = (fy + 0.5) * s + oy - s * 0.55;
-      const r = Math.max(8, s * 0.62);
+      const r = Math.max(7.5, s * 0.56);
 
       if (moving) {
         const ang = Math.atan2(fy - cur.y, fx - cur.x);
@@ -529,44 +567,13 @@ export class MapView {
       }
 
       // ظل
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
       ctx.beginPath();
-      ctx.ellipse(cx, cy + r * 0.75, r * 0.9, r * 0.35, 0, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy + r * 0.95, r * 0.95, r * 0.32, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // جسد الدرع بتدرج
-      const nrgb = hexToRgb(n.color);
-      const gr = ctx.createRadialGradient(cx - r * 0.35, cy - r * 0.4, r * 0.2, cx, cy, r);
-      gr.addColorStop(0, rgbStr(shade(nrgb, 1.45)));
-      gr.addColorStop(1, rgbStr(shade(nrgb, 0.75)));
-      ctx.fillStyle = gr;
-      ctx.beginPath();
-      ctx.arc(cx, cy, r, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.lineWidth = 2.5;
-      ctx.strokeStyle = '#140d07';
-      ctx.stroke();
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-      ctx.beginPath();
-      ctx.arc(cx, cy, r - 1.5, 0, Math.PI * 2);
-      ctx.stroke();
-
-      // راية تخفق
-      ctx.strokeStyle = '#241610';
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(cx + r * 0.8, cy - r * 0.6);
-      ctx.lineTo(cx + r * 0.8, cy - r * 2.1);
-      ctx.stroke();
-      const wav = Math.sin(now / 160 + a.id) * r * 0.12;
-      ctx.fillStyle = rgbStr(shade(nrgb, 1.2));
-      ctx.beginPath();
-      ctx.moveTo(cx + r * 0.8, cy - r * 2.1);
-      ctx.lineTo(cx + r * 0.8 - r * 1.1, cy - r * 1.75 + wav);
-      ctx.lineTo(cx + r * 0.8, cy - r * 1.3);
-      ctx.closePath();
-      ctx.fill();
+      // الدرع الوراثي بشعار الدولة
+      drawEmblem(ctx, cx, cy - r * 0.15, r * 1.12, n.color, n.darkColor, em);
 
       const isSel = sel?.type === 'army' && sel.id === a.id;
       if (isSel) {
@@ -578,22 +585,41 @@ export class MapView {
         ctx.setLineDash([5, 4]);
         ctx.lineDashOffset = now / 40;
         ctx.beginPath();
-        ctx.arc(cx, cy, r + 4 + Math.sin(now / 260) * 1.5, 0, Math.PI * 2);
+        ctx.arc(cx, cy, r * 1.55 + Math.sin(now / 260) * 1.5, 0, Math.PI * 2);
         ctx.stroke();
         ctx.restore();
       }
 
-      ctx.font = `bold ${Math.max(9, r * 0.95)}px sans-serif`;
-      ctx.lineWidth = 3;
-      ctx.strokeStyle = 'rgba(15,10,5,0.9)';
-      ctx.strokeText(fmtCount(a.soldiers), cx, cy + 1);
-      ctx.fillStyle = '#ffffff';
-      ctx.fillText(fmtCount(a.soldiers), cx, cy + 1);
+      // لوحة العدد
+      const label = fmtCount(a.soldiers);
+      ctx.font = `bold ${Math.max(9, r * 0.78)}px sans-serif`;
+      const tw = ctx.measureText(label).width;
+      const pw = Math.max(r * 1.3, tw + 9);
+      const phh = Math.max(11, r * 0.85);
+      const rx = cx - pw / 2;
+      const ry = cy + r * 0.95;
+      const rr = 3;
+      ctx.fillStyle = 'rgba(20,13,7,0.88)';
+      ctx.beginPath();
+      ctx.moveTo(rx + rr, ry);
+      ctx.arcTo(rx + pw, ry, rx + pw, ry + phh, rr);
+      ctx.arcTo(rx + pw, ry + phh, rx, ry + phh, rr);
+      ctx.arcTo(rx, ry + phh, rx, ry, rr);
+      ctx.arcTo(rx, ry, rx + pw, ry, rr);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,217,77,0.5)';
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.fillStyle = '#ffe9a8';
+      ctx.fillText(label, cx, ry + phh / 2 + 0.5);
 
+      // شريط المعنويات تحت اللوحة
+      const by = ry + phh + 2;
       ctx.fillStyle = 'rgba(0,0,0,0.55)';
-      ctx.fillRect(cx - r, cy + r + 2, r * 2, 3);
+      ctx.fillRect(cx - pw / 2, by, pw, 3);
       ctx.fillStyle = a.morale > 50 ? '#4caf50' : a.morale > 25 ? '#ff9800' : '#f44336';
-      ctx.fillRect(cx - r, cy + r + 2, (r * 2 * a.morale) / 100, 3);
+      ctx.fillRect(cx - pw / 2, by, (pw * a.morale) / 100, 3);
     }
 
     // ===== مؤثرات المعركة فوق كل شيء: موجات، شرر، دخان، لهب، سيفان =====
