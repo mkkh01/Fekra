@@ -11,7 +11,7 @@ KEYBOARD = {"inline_keyboard": [
     [{"text": "الصفقات المفتوحة", "callback_data": "open"},
      {"text": "الصفقات المغلقة", "callback_data": "closed"}],
     [{"text": "الأسعار الحالية", "callback_data": "prices"},
-     {"text": "🔄 Samurai Cycle", "callback_data": "cycle"}],
+     {"text": "🔄 Cycle Summary", "callback_data": "cycle"}],
     [{"text": "أداء النظام", "callback_data": "perf"}],
     [{"text": "القائمة الرئيسية", "callback_data": "home"}],
 ]}
@@ -49,9 +49,16 @@ def get_me():
     return ok
 
 
-def set_webhook(url):
-    # لا نحذف /start أو الأزرار المعلقة أثناء إعادة نشر Render.
-    return _api("setWebhook", {"url": url, "drop_pending_updates": False})
+def set_webhook(url, secret=""):
+    """
+    لا نحذف /start أو الأزرار المعلقة أثناء إعادة نشر Render.
+    secret: يُرسَل كترويسة X-Telegram-Bot-Api-Secret-Token مع كل تحديث،
+    وبه نتحقق أن الطلب قادم من تيليغرام فعلاً لا من أي شخص يعرف الرابط.
+    """
+    payload = {"url": url, "drop_pending_updates": False}
+    if secret:
+        payload["secret_token"] = secret
+    return _api("setWebhook", payload)
 
 
 def fmt_px(x):
@@ -74,11 +81,11 @@ def sym(s):
 def t_open(tr):
     side_ar = "شراء 🟢" if tr["side"] == 1 else "بيع 🔴"
     leg = f" (ساق {tr['leg']})" if tr.get("leg") else ""
-    return (f"⚡ <b>توصية جديدة — {AR_SYS.get(tr['system'], tr['system'])}{leg}</b>\n"
+    return (f"⚡ توصية جديدة — {AR_SYS.get(tr['system'], tr['system'])}{leg}\n"
             f"{sym(tr['symbol'])} {side_ar} | دخول: {fmt_px(tr['entry'])}\n"
             f"🎯 هدف: {fmt_px(tr['tp'])} | 🛑 وقف: {fmt_px(tr['sl'])}\n"
             f"📦 كمية: {float(tr['qty']):.6f}\n"
-            f"السبب: {tr.get('reason_ar') or 'إشارة فنية'}").replace("<b>", "").replace("</b>", "")
+            f"السبب: {tr.get('reason_ar') or 'إشارة فنية'}")
 
 
 def t_close(tr):

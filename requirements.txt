@@ -1,7 +1,12 @@
-Flask>=3.0,<4
-gunicorn>=22,<24
-psycopg2-binary>=2.9,<3
-redis>=5,<7
-pandas>=2,<3
-numpy>=2,<3
-requests>=2,<3
+# ثبّت الإصدارات: أي تغيير غير مقصود في تبعية قد يغيّر نتائج التداول.
+Flask==3.0.3
+gunicorn==23.0.0
+psycopg2-binary==2.9.10
+redis==5.2.1
+pandas==2.2.3
+numpy==2.1.3
+requests==2.32.3
+
+# أدوات التطوير (اختيارية على الخدمة، مطلوبة في CI)
+pytest==8.3.4
+ruff==0.8.4

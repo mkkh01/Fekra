@@ -1,27 +1,63 @@
-"""طبقة Supabase Postgres — اتصالات قصيرة (صديقة للـ pooler)."""
+"""
+طبقة Postgres — تجمّع اتصالات + استعلامات مجمّعة.
+
+كان كل استعلام يفتح اتصال TCP+TLS جديداً: ~70 اتصالاً في الدورة الواحدة
+(≈100,000 مصافحة يومياً). الآن تجمّع اتصالات + دوال مجمّعة تقرأ
+المراكز المفتوحة وعدّادات اليوم **مرة واحدة** بدل استعلام لكل رمز.
+"""
 import contextlib
 import json
 from pathlib import Path
 
 import psycopg2
 import psycopg2.extras
+from psycopg2 import pool as pg_pool
 
 from . import config
 
-# مايجريشنز المخطط — تُطبَّق تلقائيًا عند الإقلاع (انظر ensure_schema)
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 STATE_KEY_MIGRATIONS = "schema_migrations"
-_schema_healed = False  # حتى لا نعيد محاولة الإصلاح الذاتي في كل دورة
+_schema_healed = False
+
+_POOL = None
+
+
+def _new_pool():
+    return pg_pool.ThreadedConnectionPool(
+        minconn=1, maxconn=int(config._env("DB_POOL_MAX", "8")),
+        dsn=config.DATABASE_URL, connect_timeout=10)
+
+
+def _get_pool():
+    global _POOL
+    if _POOL is None:
+        _POOL = _new_pool()
+    return _POOL
 
 
 @contextlib.contextmanager
 def conn():
-    c = psycopg2.connect(config.DATABASE_URL, connect_timeout=10)
+    """اتصال من التجمّع (مع سقوط ناعم إلى اتصال مباشر إن تعذّر التجمّع)."""
+    if not config.DATABASE_URL:
+        raise RuntimeError("DATABASE_URL/SUPABASE_URL غير مضبوط")
     try:
-        c.autocommit = True
-        yield c
-    finally:
-        c.close()
+        p = _get_pool()
+        c = p.getconn()
+        try:
+            c.autocommit = True
+            yield c
+        finally:
+            try:
+                p.putconn(c)
+            except Exception:
+                pass
+    except (pg_pool.PoolError, RuntimeError):
+        c = psycopg2.connect(config.DATABASE_URL, connect_timeout=10)
+        try:
+            c.autocommit = True
+            yield c
+        finally:
+            c.close()
 
 
 def q_all(sql, params=()):
@@ -46,15 +82,13 @@ def health():
     return bool(r and r["ok"] == 1)
 
 
-# ── المخطط: مايجريشنز تلقائية + فحص سلامة ──
+# ────────────────────────────── المخطط ──────────────────────────────
 REQUIRED_TRADE_COLS = {
     "system", "symbol", "side", "leg", "entry", "qty", "tp", "sl",
     "trail_atr", "atr0", "hold_hours", "day", "reason_ar", "status",
     "signal_key", "exit_time", "exit_price", "reason", "net", "r", "fee",
 }
 
-# أعمدة/فهارس trades التي يكتبها الكود — ALTER صريح يشفي أي جدول قديم مهما كان
-# شكله (CREATE TABLE IF NOT EXISTS لا يضيف أعمدة لجدول موجود، لذا نحتاج هذه القائمة)
 CORE_TRADES_ALTER = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS leg TEXT DEFAULT ''",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS tp DOUBLE PRECISION DEFAULT 0",
@@ -72,13 +106,21 @@ CORE_TRADES_ALTER = [
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS day DATE",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS reason_ar TEXT DEFAULT ''",
     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS signal_key TEXT NOT NULL DEFAULT ''",
+    # أعمدة جودة التنفيذ (مايجريشن 003)
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS sl_current DOUBLE PRECISION",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS funding DOUBLE PRECISION DEFAULT 0",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS spread_bps DOUBLE PRECISION",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS slip_bps DOUBLE PRECISION",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS entry_ref DOUBLE PRECISION",
+    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS client_order_id TEXT",
     "CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status)",
     "CREATE INDEX IF NOT EXISTS idx_trades_day ON trades(day)",
+    "CREATE INDEX IF NOT EXISTS idx_equity_marks_equity ON equity_marks(equity DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts DESC)",
 ]
 
 
 def schema_ok():
-    """هل يملك جدول trades كل الأعمدة التي يكتبها الكود؟"""
     try:
         rows = q_all("SELECT column_name FROM information_schema.columns "
                      "WHERE table_name='trades'")
@@ -89,7 +131,6 @@ def schema_ok():
 
 
 def _split_sql_statements(sql):
-    """تقسيم ملف SQL بسيط إلى عبارات — يتجاهل التعليقات ولا ينقسم داخل النصوص."""
     out, buf, in_str = [], [], False
     i, n = 0, len(sql)
     while i < n:
@@ -120,18 +161,6 @@ def _split_sql_statements(sql):
 
 
 def ensure_schema():
-    """يبني/يُصلح مخطط القاعدة تلقائيًا ليطابق الكود.
-
-    1) يطبّق ملفات migrations/*.sql غير المطبَّقة بعد (كلها idempotent) —
-       العبارات تُنفَّذ واحدة واحدة حتى لا يمنع فشل عبارة (مثل فهرس فريد فوق
-       بيانات مكررة) بقية الإصلاحات، ويُعلَّم الملف مطبَّقًا في جدول state
-       فقط إذا نجحت كل عباراته.
-    2) ثم يشغّل ALTER صريحًا لكل عمود يكتبه الكود — يشفي جدول trades القديم
-       مهما كان شكله (مثل غياب signal_key الذي أوقف فتح الصفقات).
-    3) يعيد الملفات التي فشلت بعد شفاء الأعمدة (تبعيات ترتيب: فهرس في الملف
-       على عمود يُضاف لاحقًا).
-    يعيد قائمة أخطاء فارغة عند النجاح الكامل.
-    """
     applied = set()
     try:
         applied = set(json.loads(get_state(STATE_KEY_MIGRATIONS, "[]")))
@@ -186,7 +215,6 @@ def ensure_schema():
         else:
             _mark(path)
     if failed:
-        # شفاء الأعمدة الناقصة ثم جولة أخيرة على الملفات التي فشلت
         _core_alters()
         retry_errors = []
         for path in failed:
@@ -195,29 +223,31 @@ def ensure_schema():
                 retry_errors.append(f"{path.name}: " + " | ".join(ferr[:3]))
             else:
                 _mark(path)
-        errors = retry_errors  # أخطاء الجولة الأولى أصبحت مهملة إن نجحت الإعادة
-    # الخطوة الشافية النهائية: تأكيد كل أعمدة/فهارس trades مهما كانت الحالة
+        errors = retry_errors
     errors.extend(_core_alters())
     if not errors and not schema_ok():
         errors.append("schema still incomplete after ensure")
     return errors
 
 
-# ── الصفقات ──
+# ────────────────────────────── الصفقات ──────────────────────────────
 def open_trade(system, symbol, side, entry, qty, tp, sl, leg="", trail_atr=0.0,
-               atr0=0.0, hold_hours=24.0, day=None, reason_ar="", signal_key=""):
+               atr0=0.0, hold_hours=24.0, day=None, reason_ar="", signal_key="",
+               meta=None):
     global _schema_healed
+    meta = meta or {}
     sql = """INSERT INTO trades (system,symbol,side,entry,qty,tp,sl,leg,trail_atr,atr0,
-                                 hold_hours,day,reason_ar,status,signal_key)
-             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'OPEN',%s)
+                                 hold_hours,day,reason_ar,status,signal_key,
+                                 sl_current,spread_bps,slip_bps,entry_ref,client_order_id)
+             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s,%s,%s,%s)
              RETURNING id"""
     params = (system, symbol, side, entry, qty, tp or 0, sl, leg, trail_atr, atr0,
-              hold_hours, day, reason_ar, signal_key)
+              hold_hours, day, reason_ar, signal_key,
+              sl, meta.get("spread_bps"), meta.get("slip_bps"),
+              meta.get("entry_ref"), meta.get("client_order_id"))
     try:
         r = q_one(sql, params)
     except psycopg2.errors.UndefinedColumn as e:
-        # انجراف المخطط: قاعدة حية أقدم من الكود (مثل غياب signal_key) —
-        # أعد بناء/إصلاح المخطط مرة واحدة ثم أعد المحاولة إن اكتملت الأعمدة.
         if _schema_healed:
             raise
         _schema_healed = True
@@ -230,43 +260,63 @@ def open_trade(system, symbol, side, entry, qty, tp, sl, leg="", trail_atr=0.0,
             raise
         r = q_one(sql, params)
     except psycopg2.errors.UniqueViolation:
-        # Race-safe deduplication: another cycle already inserted this position.
         return None
     return r["id"] if r else None
 
 
 def open_positions(system=None):
     if system:
-        return q_all("SELECT * FROM trades WHERE status='OPEN' AND system=%s ORDER BY id", (system,))
+        return q_all("SELECT * FROM trades WHERE status='OPEN' AND system=%s ORDER BY id",
+                     (system,))
     return q_all("SELECT * FROM trades WHERE status='OPEN' ORDER BY id")
 
 
-def close_trade(tid, exit_price, reason, net, r, fee):
+def day_counts_map(day, systems):
+    """يقرأ عدّادات اليوم كلها باستعلام واحد بدل استعلام لكل رمز."""
+    if not systems:
+        return {}
+    rows = q_all("SELECT system,symbol,n FROM day_counts WHERE day=%s AND system = ANY(%s)",
+                 (day, list(systems)))
+    return {(r["system"], r["symbol"]): r["n"] for r in rows}
+
+
+def update_sl(tid, sl):
+    exec("UPDATE trades SET sl_current=%s WHERE id=%s", (sl, tid))
+
+
+def close_trade(tid, exit_price, reason, net, r, fee, funding=0.0):
     exec("""UPDATE trades SET status='CLOSED', exit_time=now(), exit_price=%s,
-            reason=%s, net=%s, r=%s, fee=%s WHERE id=%s""",
-         (exit_price, reason, net, r, fee, tid))
+            reason=%s, net=%s, r=%s, fee=%s, funding=%s WHERE id=%s""",
+         (exit_price, reason, net, r, fee, funding, tid))
 
 
 def recent_closed(limit=10):
-    return q_all("SELECT * FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT %s", (limit,))
+    return q_all("SELECT * FROM trades WHERE status='CLOSED' ORDER BY id DESC LIMIT %s",
+                 (limit,))
 
 
 def get_stats(system=None):
     where = "status='CLOSED'" + (" AND system=%s" if system else "")
     p = (system,) if system else ()
-    rows = q_all("SELECT net FROM trades WHERE " + where, p)
-    n = len(rows)
-    if n == 0:
-        return dict(n=0, wins=0, losses=0, wr=0.0, pf=0.0, net=0.0)
-    wins = [x["net"] for x in rows if x["net"] > 0]
-    loss = [-x["net"] for x in rows if x["net"] <= 0]
-    g, l = sum(wins), sum(loss)
-    return dict(n=n, wins=len(wins), losses=len(loss), wr=round(len(wins) / n * 100, 1),
-                pf=round(g / l, 2) if l > 0 else 0.0,
-                net=round(sum(x["net"] for x in rows), 2))
+    # تجميع في القاعدة بدل سحب كل الصفوف إلى الذاكرة
+    row = q_one(f"""SELECT COUNT(*) AS n,
+                           COUNT(*) FILTER (WHERE net > 0) AS wins,
+                           COALESCE(SUM(net) FILTER (WHERE net > 0), 0) AS gross_win,
+                           COALESCE(SUM(-net) FILTER (WHERE net <= 0), 0) AS gross_loss,
+                           COALESCE(SUM(net), 0) AS net,
+                           COALESCE(SUM(funding), 0) AS funding
+                    FROM trades WHERE {where}""", p)
+    if not row or row["n"] == 0:
+        return dict(n=0, wins=0, losses=0, wr=0.0, pf=0.0, net=0.0, funding=0.0)
+    n = int(row["n"])
+    return dict(n=n, wins=int(row["wins"]), losses=n - int(row["wins"]),
+                wr=round(int(row["wins"]) / n * 100, 1),
+                pf=round(float(row["gross_win"]) / float(row["gross_loss"]), 2)
+                if float(row["gross_loss"]) > 0 else 0.0,
+                net=round(float(row["net"]), 2),
+                funding=round(float(row["funding"]), 2))
 
 
-# ── حدود اليوم ──
 def day_count(day, system, symbol):
     r = q_one("SELECT n FROM day_counts WHERE day=%s AND system=%s AND symbol=%s",
               (day, system, symbol))
@@ -279,19 +329,46 @@ def bump_day(day, system, symbol):
          (day, system, symbol))
 
 
-# ── الرصيد ──
+# ────────────────────────────── الرصيد ──────────────────────────────
 def realized_equity():
     r = q_one("SELECT COALESCE(SUM(net),0) AS s FROM trades WHERE status='CLOSED'")
     return config.PAPER_EQUITY + float(r["s"] or 0)
 
 
-def mark_equity(equity):
-    exec("INSERT INTO equity_marks (equity) VALUES (%s)", (equity,))
+def unrealized_pnl(prices):
+    """الربح/الخسارة غير المحقق على المراكز المفتوحة (mark-to-market)."""
+    tot = 0.0
+    for t in open_positions():
+        px = prices.get(t["symbol"])
+        if px:
+            tot += t["side"] * (float(px) - float(t["entry"])) * float(t["qty"])
+    return tot
+
+
+def equity(prices=None):
+    """الرصيد الكلي = المحقق + غير المحقق — هذا ما يجب أن تعمل عليه حدود المخاطر."""
+    return realized_equity() + (unrealized_pnl(prices) if prices else 0.0)
+
+
+def mark_equity(eq):
+    exec("INSERT INTO equity_marks (equity) VALUES (%s)", (eq,))
     r = q_one("SELECT MAX(equity) AS peak FROM equity_marks")
-    return float(r["peak"]) if r and r["peak"] else equity
+    return float(r["peak"]) if r and r["peak"] else eq
 
 
-# ── الأحداث ──
+def prune_old(days=30):
+    """يحذف السجلات القديمة حتى لا تنمو الجداول بلا حدود."""
+    try:
+        exec("DELETE FROM ct_cycles WHERE started_at < now() - (%s || ' days')::interval",
+             (str(days),))
+        exec("DELETE FROM events WHERE ts < now() - (%s || ' days')::interval", (str(days),))
+        exec("DELETE FROM equity_marks WHERE ts < now() - (%s || ' days')::interval",
+             (str(days * 12),))
+    except Exception:
+        pass
+
+
+# ────────────────────────────── الأحداث ──────────────────────────────
 def log_event(level, msg):
     try:
         exec("INSERT INTO events (level,msg) VALUES (%s,%s)", (level, msg[:2000]))
@@ -299,7 +376,7 @@ def log_event(level, msg):
         pass
 
 
-# ── الدورات ──
+# ────────────────────────────── الدورات ──────────────────────────────
 def save_cycle(c):
     exec("""INSERT INTO ct_cycles (started_at,ended_at,duration_ms,scanned_day,scanned_falcon,
             reject_day,reject_falcon,signals,opened,closed,health,errors,equity,note)
@@ -328,7 +405,7 @@ def system_totals(today):
                 today_n=row["today_n"], closed_n=row["closed_n"])
 
 
-# ── حالة عامة ──
+# ────────────────────────────── حالة عامة ──────────────────────────────
 def get_state(key, default=None):
     r = q_one("SELECT value FROM state WHERE key=%s", (key,))
     return r["value"] if r else default

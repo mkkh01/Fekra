@@ -1,5 +1,5 @@
 """معالج بوت تيليغرام: /start + الأزرار الخمسة."""
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from . import config, db, notify
 from .cache import cache
 from .market import VisionMarket
@@ -33,10 +33,23 @@ def handle_update(up):
 
 def _on_start(chat):
     # أرسل أولًا؛ لا نجعل قاعدة البيانات شرطًا لعمل أمر /start.
+    # adm يشمل المدير المسجّل مسبقاً في القاعدة حتى لا ينكسر البوت
+    # عند نشر هذا الإصدار قبل ضبط ADMIN_CHAT_ID.
     adm = str(config.ADMIN_CHAT_ID or "")
+    if not adm:
+        try:
+            adm = str(db.get_state("admin_chat_id", "") or "")
+        except Exception:
+            adm = ""
     if adm and chat != adm:
         ok, result = notify.send_text(chat, "⛔ هذا البوت خاص.", None)
     else:
+        if not adm and not config.ALLOW_AUTO_ADMIN:
+            # ❗ خطر استيلاء: أول من يرسل /start كان يصبح مديراً تلقائياً.
+            ok, result = notify.send_text(
+                chat, "⛔ هذا البوت خاص. اضبط ADMIN_CHAT_ID في إعدادات الخدمة.", None)
+            print(f"[telegram-start-rejected] chat={chat} (لا يوجد ADMIN_CHAT_ID)", flush=True)
+            return True
         ok, result = notify.send_text(chat, "🦅 أهلاً بك في نظام FALCON!\nتم تسجيلك كمدير. اختر من الأزرار 👇", KEYBOARD)
         if ok and not adm:
             try:
@@ -169,7 +182,7 @@ def render_perf():
     health = _live_health()
     d = db.get_stats("DAY")
     f = db.get_stats("FALCON")
-    t = db.get_stats()
+    db.get_stats()
     eq = db.realized_equity()
     totals = db.system_totals(today)
     c = db.last_cycle()
@@ -189,9 +202,9 @@ def render_perf():
              f"📈 P&L المحقق: ${(eq - config.PAPER_EQUITY):.2f}",
              f"📦 مفتوحة: {totals['open_n']} | مغلقة: {totals['closed_n']}",
              f"🎯 إشارات اليوم: {signals_today}", "",
-             f"⚡ DAY",
+             "⚡ DAY",
              f"فوز: {d['wins']} | خسارة: {d['losses']} | WR: {d['wr']}% | PnL: ${d['net']:.2f}", "",
-             f"🦅 FALCON",
+             "🦅 FALCON",
              f"فوز: {f['wins']} | خسارة: {f['losses']} | WR: {f['wr']}% | PnL: ${f['net']:.2f}", "",
              f"🛡️ الحماية: {halted or 'غير مفعلة'}",
              f"❌ الأخطاء الحالية: {'لا يوجد' if not errors else ' | '.join(str(e)[:100] for e in errors[:4])}"]
@@ -243,14 +256,13 @@ def _reason_lines(title, reasons):
 
 
 def render_cycle():
-    """Samurai Cycle: تقرير حي واضح، بلا سجل أخطاء تاريخي."""
+    """Cycle Summary: تقرير حي واضح، بلا سجل أخطاء تاريخي."""
     import json
     now = datetime.now(timezone.utc)
-    today = now.strftime("%Y-%m-%d")
     interval = config.SCAN_INTERVAL_SEC
     health = _live_health()
     c = db.last_cycle()
-    lines = ["🔄 Samurai Cycle — الحالة الحية", ""]
+    lines = ["🔄 Cycle Summary — الحالة الحية", ""]
 
     if c:
         cycle_health = c.get("health") if isinstance(c.get("health"), dict) else json.loads(c.get("health") or "{}")

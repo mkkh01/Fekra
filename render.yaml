@@ -1,26 +1,42 @@
 # CT — نشر بضغطة واحدة على Render (Blueprint)
-# أو أنشئ Web Service يدوياً بنفس الأوامر والمتغيرات أدناه.
+# ⚠️ المجدول يعمل داخل عامل ويب واحد فقط؛ لا ترفع WEB_CONCURRENCY فوق 1
+#    وإلا تكرّرت حلقة المسح (كل عامل يستورد app.main ويبدأ مجدولاً).
 services:
   - type: web
     name: ct-falcon
     runtime: python
-    plan: starter            # ⚠️ المجانية تنام وتوقف الدورات — Starter إجباري لـ 24/7
+    plan: starter            # المجانية تنام وتوقف الدورات — Starter إجباري لـ 24/7
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn app.main:app --workers 1 --bind 0.0.0.0:$PORT --timeout 180
+    healthCheckPath: /health
     envVars:
-      - key: SUPABASE_URL        # رابط Postgres (pooler) — من رسالتك
+      - key: WEB_CONCURRENCY
+        value: 1
+      - key: DATABASE_URL        # رابط Postgres (pooler)
         sync: false
       - key: REDIS_URL
         sync: false
-      - key: BOT_TOKEN           # توكن بوت تيليغرام (رفعته أنت ✅)
+      - key: BOT_TOKEN
         sync: false
-      - key: ADMIN_CHAT_ID       # رقم شاتك — يُسجل تلقائياً عند أول /start إن تُرك فارغاً
+      - key: ADMIN_CHAT_ID       # إجباري
         sync: false
-      - key: PUBLIC_URL          # رابط الخدمة https://ct-falcon.onrender.com (للـ webhook)
+      - key: PUBLIC_URL
         sync: false
+      - key: WEBHOOK_SECRET      # إجباري لحماية نقطة الويب هوك
+        generateValue: true
+      - key: ADMIN_API_TOKEN
+        generateValue: true
       - key: SCAN_INTERVAL_SEC
         value: 60
+      - key: MONITOR_INTERVAL_SEC
+        value: 5
       - key: PAPER_EQUITY
         value: 10000
       - key: RUN_SCHEDULER
+        value: 1
+      - key: ENABLE_DAY
+        value: 0          # ⚠️ اتركه 0 حتى تُعاد معايرة المعاملات (انظر التقرير)
+      - key: ENABLE_FALCON
+        value: 1
+      - key: FUNDING_ENABLED
         value: 1
