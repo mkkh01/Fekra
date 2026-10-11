@@ -73,11 +73,11 @@ WATCHED_SYMBOLS = [
     "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
 
     # شبكات الطبقة الأولى والذكاء الاصطناعي (L1s & AI Ecosystem)
-    "NEARUSDT", "APTUSDT", "TIAUSDT", "TAOUSDT", "FETUSDT",
+    "NEARUSDT", "APTUSDT", "TIAUSDT", "GALAUSDT", "FETUSDT",
     "RENDERUSDT", "INJUSDT", "SEIUSDT", "ATOMUSDT", "DOTUSDT",
 
     # حلول الطبقة الثانية والسيولة والتمويل اللامركزي (L2s & DeFi)
-    "ARBUSDT", "OPUSDT", "STRKUSDT", "UNIUSDT", "AAVEUSDT",
+    "ARBUSDT", "OPUSDT", "SANDUSDT", "UNIUSDT", "AAVEUSDT",
     "ENAUSDT", "ONDOUSDT", "WLDUSDT",
 
     # العملات الكلاسيكية والتخزين والزخم (Legacy & High Momentum)

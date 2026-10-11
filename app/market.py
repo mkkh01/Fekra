@@ -15,13 +15,19 @@ from . import config
 
 
 class VisionMarket:
-    # الأوّل هو المصدر الرسمي للبيانات العامة؛ الباقي بدائل احتياطية موثوقة.
-    BASES = ("https://data-api.binance.vision",
-             "https://api1.binance.com",
-             "https://api2.binance.com",
-             "https://api3.binance.com",
-             "https://api.binance.com",
-             "https://www.binance.com")
+    # المصادر الأساسية (Binance العالمية)
+    PRIMARY_BASES = (
+        "https://data-api.binance.vision",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://api3.binance.com",
+        "https://api.binance.com",
+        "https://www.binance.com",
+    )
+    # المصادر الاحتياطية (Binance.US — بنية منفصلة لا تتأثر بحظر IP العالمي لـ 418/429)
+    FALLBACK_BASES = (
+        "https://api.binance.us",
+    )
 
     _cooldown_until = 0
 
@@ -33,28 +39,39 @@ class VisionMarket:
         self._lock = threading.Lock()
 
     def _order(self):
+        import time
         with self._lock:
-            if self._last_good and self._last_good in self.BASES:
+            now = time.time()
+            if now < VisionMarket._cooldown_until:
+                # أثناء فترة حظر أو تهدئة Binance العالمية، نوجّه الطلبات حصراً للاحتياطي
+                # حتى لا نرسل أي طلب يمدد الحظر التلقائي في Binance.com
+                return self.FALLBACK_BASES
+
+            bases = self.PRIMARY_BASES + self.FALLBACK_BASES
+            if self._last_good and self._last_good in bases:
                 lg = self._last_good
-                return (lg,) + tuple(b for b in self.BASES if b != lg)
-            return self.BASES
+                return (lg,) + tuple(b for b in bases if b != lg)
+            return bases
 
     def _get(self, path, **kwargs):
-        import time
-        now = time.time()
-        if now < VisionMarket._cooldown_until:
-            rem = int(VisionMarket._cooldown_until - now)
-            raise requests.HTTPError(f"Binance 429 backoff active ({rem}s remaining)")
-
+        import time, re
         last = None
         for base in self._order():
             try:
                 r = self.sess.get(f"{base}{path}", **kwargs)
-                if r.status_code == 429:
-                    retry_after = int(r.headers.get("Retry-After", "60"))
-                    cool = max(30, retry_after)
-                    VisionMarket._cooldown_until = time.time() + cool
-                    raise requests.HTTPError(f"429 from {base} (cooling down {cool}s)")
+                if r.status_code in (418, 429):
+                    # حظر IP مؤقت (418/429): استخراج موعد انتهاء الحظر بدقة
+                    text = r.text or ""
+                    m = re.search(r"banned until (\d+)", text)
+                    if m:
+                        ban_ts = int(m.group(1)) / 1000.0
+                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, ban_ts + 10.0)
+                    else:
+                        retry_after = int(r.headers.get("Retry-After", "300"))
+                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, time.time() + max(180, retry_after))
+                    last = requests.HTTPError(f"{r.status_code} from {base}")
+                    # استمر فوراً للمصدر الاحتياطي دون إيقاف الدورة!
+                    continue
                 if r.status_code != 200:
                     last = requests.HTTPError(f"{r.status_code} from {base}")
                     continue
