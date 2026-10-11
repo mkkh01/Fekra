@@ -36,6 +36,8 @@ services:
         value: 5
       - key: PAPER_EQUITY
         value: 10000
+      - key: MAX_CONCURRENT
+        value: 8
       - key: RUN_SCHEDULER
         value: 1
       - key: ENABLE_DAY

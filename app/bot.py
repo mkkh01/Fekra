@@ -228,7 +228,8 @@ def render_prices():
         except Exception:
             pass
     now = datetime.now(timezone.utc).strftime("%H:%M")
-    return f"💰 الأسعار الحية ({now} UTC):\n" + "\n".join(sorted(out)[:40]) if out else "⚠️ لا أسعار متاحة الآن."
+    header = f"💰 الأسعار الحية ({now} UTC) — [{len(out)} عملة متابعة]:\n"
+    return (header + "\n".join(sorted(out)[:45]))[:3800] if out else "⚠️ لا أسعار متاحة الآن."
 
 
 def _reason_label(key):

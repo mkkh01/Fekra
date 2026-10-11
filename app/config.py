@@ -66,12 +66,29 @@ ENABLE_DAY = _env("ENABLE_DAY", "1") == "1"
 ENABLE_FALCON = _env("ENABLE_FALCON", "1") == "1"
 
 # ── العوالم (قوائم العملات المصفاة استناداً لنتائج الباك تست التاريخي لعدة سنوات) ──
-# DAY: العملات ذات الارتداد القوي والأداء الفائق (WR 85.9% | PF 1.45)
-DAY_SYMBOLS = ["NEARUSDT", "ICPUSDT", "DOGEUSDT", "XRPUSDT"]
+# تم توسيع نطاق المتابعة ليشمل 36 عملة رقمية قيادية عالية السيولة (ضمن نطاق 30-40 عملة)
+WATCHED_SYMBOLS = [
+    # العملات القيادية والأساسية (Majors)
+    "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
+
+    # شبكات الطبقة الأولى والذكاء الاصطناعي (L1s & AI Ecosystem)
+    "NEARUSDT", "APTUSDT", "TIAUSDT", "TAOUSDT", "FETUSDT",
+    "RENDERUSDT", "INJUSDT", "SEIUSDT", "ATOMUSDT", "DOTUSDT",
+
+    # حلول الطبقة الثانية والسيولة والتمويل اللامركزي (L2s & DeFi)
+    "ARBUSDT", "OPUSDT", "STRKUSDT", "UNIUSDT", "AAVEUSDT",
+    "ENAUSDT", "ONDOUSDT", "WLDUSDT",
+
+    # العملات الكلاسيكية والتخزين والزخم (Legacy & High Momentum)
+    "LTCUSDT", "BCHUSDT", "ICPUSDT", "FILUSDT", "TRXUSDT",
+    "XLMUSDT", "PEPEUSDT", "SHIBUSDT"
+]
+
 ANCHOR = "BTCUSDT"
-# FALCON: العملات القيادية الأقوى في الاتجاه على إطار 5 سنوات (WR 73.4% | PF 1.26)
-FALCON_SYMBOLS = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "SOLUSDT"]
-ALL_SYMBOLS = sorted(set(DAY_SYMBOLS + FALCON_SYMBOLS + [ANCHOR]))
+DAY_SYMBOLS = WATCHED_SYMBOLS
+FALCON_SYMBOLS = WATCHED_SYMBOLS
+ALL_SYMBOLS = sorted(set(WATCHED_SYMBOLS + [ANCHOR]))
 
 # ── FALCON-DAY params (معايرة تحقق Win Rate >= 85% وعامل ربح 1.33+) ──
 DAY = dict(dev=1.2, btc_cap=0.6, rsiX=40, adx_max=35, atr_min_pct=0.0004,
@@ -84,7 +101,7 @@ FALCON = dict(don=20, vol_mult=1.0, adx_min=18, mom_mult=0.8, sl_atr=2.5,
               risk_per_trade=0.01, max_per_day=3)
 
 # ── المخاطر ──
-RISK = dict(max_concurrent=6,
+RISK = dict(max_concurrent=_ienv("MAX_CONCURRENT", 6),
             daily_loss_halt=_fenv("DAILY_LOSS_HALT", 0.0),      # 0 = معطّل
             max_drawdown_halt=_fenv("MAX_DRAWDOWN_HALT", 0.0),  # 0 = معطّل
             max_notional_pct=0.95, min_notional_usd=10.0,
