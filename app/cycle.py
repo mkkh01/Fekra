@@ -311,12 +311,12 @@ def _scan_falcon(md, today, equity, summ, send, open_pos, counts):
 
             sl_target = px - side * sl_d
             opened_any = False
-            for leg, frac, tp in (("A", 0.5, px + side * p["tp_atr"] * a), ("B", 0.5, None)):
+            for leg, frac, tp in (("A", 0.5, px + side * p["tp_atr"] * a), ("B", 0.5, px + side * (p["tp_atr"] * 1.25) * a)):
                 qty = trader.position_size(equity, p["risk_per_trade"] * frac, sl_d, px)
                 if qty <= 0:
                     rej["risk-size"] += 1
                     continue
-                tr = trader.place_entry("FALCON", sym_, side, qty, px, tp or 0, sl_target,
+                tr = trader.place_entry("FALCON", sym_, side, qty, px, tp, sl_target,
                                         today, p["max_hold_bars"] * 4, leg=leg,
                                         trail_atr=p["trail_atr"] if leg == "B" else 0,
                                         atr_now=a, reason_ar=FALCON_AR, bump=(leg == "A"),

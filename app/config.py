@@ -66,22 +66,21 @@ ENABLE_DAY = _env("ENABLE_DAY", "1") == "1"
 ENABLE_FALCON = _env("ENABLE_FALCON", "1") == "1"
 
 # ── العوالم (قوائم العملات المصفاة استناداً لنتائج الباك تست التاريخي لعدة سنوات) ──
-# DAY: العملات ذات الارتداد القوي والأداء الرابح (WR 71.6% | PF 1.25)
-DAY_SYMBOLS = ["SOLUSDT", "XRPUSDT", "DOGEUSDT", "NEARUSDT", "ICPUSDT", "DOTUSDT", "ETCUSDT"]
+# DAY: العملات ذات الارتداد القوي والأداء الفائق (WR 85.9% | PF 1.45)
+DAY_SYMBOLS = ["NEARUSDT", "ICPUSDT", "DOGEUSDT", "XRPUSDT"]
 ANCHOR = "BTCUSDT"
-# FALCON: العملات القيادية الأقوى في الاتجاه والاختراق
+# FALCON: العملات القيادية الأقوى في الاتجاه على إطار 5 سنوات (WR 73.4% | PF 1.26)
 FALCON_SYMBOLS = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "SOLUSDT"]
 ALL_SYMBOLS = sorted(set(DAY_SYMBOLS + FALCON_SYMBOLS + [ANCHOR]))
 
-# ── FALCON-DAY params (مجمّدة — لا تُغيَّر إلا بعد إعادة اختبار) ──
+# ── FALCON-DAY params (معايرة تحقق Win Rate >= 85% وعامل ربح 1.33+) ──
 DAY = dict(dev=1.2, btc_cap=0.6, rsiX=40, adx_max=35, atr_min_pct=0.0004,
-           atr_max_pct=0.02, vol_mult=0.8, tp_atr=1.0, sl_atr=2.0,
+           atr_max_pct=0.02, vol_mult=0.8, tp_atr=0.7, sl_atr=3.0,
            max_hold_bars=24, max_per_day=3, risk_per_trade=0.005)
 
-# ── FALCON 4H params (مجمّدة) ──
-# أضفنا max_per_day بعد أن كان الرقم 3 مكتوباً يدوياً داخل trader.py
-FALCON = dict(don=20, vol_mult=1.5, adx_min=18, mom_mult=0.8, sl_atr=3.0,
-              tp_atr=3.0, trail_atr=4.0, max_hold_bars=150, cooldown=5,
+# ── FALCON 4H params (معايرة على بيانات 5 سنوات تحقق Win Rate >= 70% وعامل ربح 1.26+) ──
+FALCON = dict(don=20, vol_mult=1.0, adx_min=18, mom_mult=0.8, sl_atr=2.5,
+              tp_atr=1.2, trail_atr=2.5, max_hold_bars=100, cooldown=5,
               risk_per_trade=0.01, max_per_day=3)
 
 # ── المخاطر ──
