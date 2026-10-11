@@ -1,11 +1,18 @@
 """تيليغرام: إرسال خام عبر HTTP (بدون مكتبات ثقيلة) + تنسيق الرسائل."""
+from datetime import datetime
 import requests
 from . import config
 
 API = "https://api.telegram.org/bot"
 
 AR_SYS = {"DAY": "FALCON-DAY ⚡", "FALCON": "FALCON 🦅"}
-AR_EXIT = {"TP": "تحقق الهدف 🎯", "SL": "ضرب الوقف 🛑", "TSL": "الوقف المتحرك 🔒", "TIME": "انتهاء الوقت ⏱️"}
+AR_EXIT = {
+    "TP": "تحقق الهدف 🎯",
+    "SL": "ضرب الوقف 🛑",
+    "TSL": "الوقف المتحرك 🔒",
+    "BE": "نقطة التعادل (حماية) 🛡️",
+    "TIME": "انتهاء الوقت ⏱️",
+}
 
 KEYBOARD = {"inline_keyboard": [
     [{"text": "الصفقات المفتوحة", "callback_data": "open"},
@@ -81,9 +88,22 @@ def sym(s):
 def t_open(tr):
     side_ar = "شراء 🟢" if tr["side"] == 1 else "بيع 🔴"
     leg = f" (ساق {tr['leg']})" if tr.get("leg") else ""
+    px = float(tr["entry"])
+    tp = float(tr.get("tp") or 0)
+    sl = float(tr.get("sl") or 0)
+    tp_str = fmt_px(tp)
+    sl_str = fmt_px(sl)
+    if px > 0:
+        if tp > 0:
+            tp_pct = abs(tp - px) / px * 100
+            tp_str += f" (+{tp_pct:.1f}%)" if tr["side"] == 1 else f" (-{tp_pct:.1f}%)"
+        if sl > 0:
+            sl_pct = abs(px - sl) / px * 100
+            sl_str += f" (-{sl_pct:.1f}%)" if tr["side"] == 1 else f" (+{sl_pct:.1f}%)"
+
     return (f"⚡ توصية جديدة — {AR_SYS.get(tr['system'], tr['system'])}{leg}\n"
-            f"{sym(tr['symbol'])} {side_ar} | دخول: {fmt_px(tr['entry'])}\n"
-            f"🎯 هدف: {fmt_px(tr['tp'])} | 🛑 وقف: {fmt_px(tr['sl'])}\n"
+            f"{sym(tr['symbol'])} {side_ar} | دخول: {fmt_px(px)}\n"
+            f"🎯 هدف: {tp_str} | 🛑 وقف: {sl_str}\n"
             f"📦 كمية: {float(tr['qty']):.6f}\n"
             f"السبب: {tr.get('reason_ar') or 'إشارة فنية'}")
 
@@ -92,9 +112,34 @@ def t_close(tr):
     win = tr["net"] >= 0
     side_ar = "شراء" if tr["side"] == 1 else "بيع"
     leg = f" (ساق {tr['leg']})" if tr.get("leg") else ""
+    reason = tr.get("reason", "")
+    reason_label = AR_EXIT.get(reason, reason)
+
+    # حساب مدة الاحتفاظ بتنسيق مقروء
+    held_str = ""
+    entry_t = tr.get("entry_time")
+    exit_t = tr.get("exit_time")
+    if entry_t and exit_t:
+        try:
+            if isinstance(entry_t, str):
+                entry_t = datetime.fromisoformat(entry_t)
+            if isinstance(exit_t, str):
+                exit_t = datetime.fromisoformat(exit_t)
+            sec = max(0, int((exit_t - entry_t).total_seconds()))
+            m, s = divmod(sec, 60)
+            h, m = divmod(m, 60)
+            if h > 0:
+                held_str = f" | ⏱️ {h}س {m}د"
+            elif m > 0:
+                held_str = f" | ⏱️ {m}د {s}ث"
+            else:
+                held_str = f" | ⏱️ {s}ث"
+        except Exception:
+            pass
+
     return (f"{'✅ فوز' if win else '❌ خسارة'} — {sym(tr['symbol'])} {side_ar}{leg}\n"
-            f"النتيجة: {'+' if win else ''}{tr['net']}$ (R={tr['r']})\n"
-            f"السبب: {AR_EXIT.get(tr['reason'], tr['reason'])}\n"
+            f"النتيجة: {'+' if win else ''}{tr['net']}$ (R={tr['r']}){held_str}\n"
+            f"السبب: {reason_label}\n"
             f"دخول {fmt_px(tr['entry'])} → خروج {fmt_px(tr['exit_price'])}")
 
 

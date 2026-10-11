@@ -35,7 +35,7 @@ services:
       - key: RUN_SCHEDULER
         value: 1
       - key: ENABLE_DAY
-        value: 0          # ⚠️ اتركه 0 حتى تُعاد معايرة المعاملات (انظر التقرير)
+        value: 1          # تم تفعيله بعد إعادة المعايرة وتصفية قائمة الرموز (WR=71.6%)
       - key: ENABLE_FALCON
         value: 1
       - key: FUNDING_ENABLED

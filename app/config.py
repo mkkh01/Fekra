@@ -50,15 +50,27 @@ MONITOR_INTERVAL_SEC = _ienv("MONITOR_INTERVAL_SEC", 5)
 # مهلة الشبكة لكل محاولة (كانت 20 ثانية × 10 نقاط = حتى 200 ثانية للنداء الواحد!)
 MARKET_TIMEOUT_SEC = _fenv("MARKET_TIMEOUT_SEC", 6.0)
 
+# ── ضوابط الصفقات الحية (منع الدخول المتأخر أو المشوه) ──
+# أقصى عمر مسموح به لإشارة الشمعة المغلقة بالثواني قبل رفضها كإشارة قديمة (stale)
+SIGNAL_MAX_AGE_SEC_DAY = _ienv("SIGNAL_MAX_AGE_SEC_DAY", 180)     # 3 دقائق لشمعة 15m
+SIGNAL_MAX_AGE_SEC_FALCON = _ienv("SIGNAL_MAX_AGE_SEC_FALCON", 900) # 15 دقيقة لشمعة 4H
+# أقصى انحراف مسموح به بين السعر اللحظي الحي وسعر إغلاق شمعة الإشارة (0.4%)
+MAX_PRICE_DRIFT_PCT = _fenv("MAX_PRICE_DRIFT_PCT", 0.004)
+
+# ── تأمين الأرباح بنقطة التعادل (Breakeven) ──
+BREAKEVEN_ENABLED = _env("BREAKEVEN_ENABLED", "1") == "1"
+BREAKEVEN_TRIGGER_RATIO = _fenv("BREAKEVEN_TRIGGER_RATIO", 0.5)   # عند قطع 50% من مسافة الهدف
+
 # ── المحركات المعطّلة (لإيقاف نظام دون حذف كوده) ──
 ENABLE_DAY = _env("ENABLE_DAY", "1") == "1"
 ENABLE_FALCON = _env("ENABLE_FALCON", "1") == "1"
 
-# ── العوالم ──
-DAY_SYMBOLS = ["SOLUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "NEARUSDT",
-               "DOTUSDT", "UNIUSDT", "ETCUSDT", "FILUSDT", "ICPUSDT", "VETUSDT", "ALGOUSDT"]
+# ── العوالم (قوائم العملات المصفاة استناداً لنتائج الباك تست التاريخي لعدة سنوات) ──
+# DAY: العملات ذات الارتداد القوي والأداء الرابح (WR 71.6% | PF 1.25)
+DAY_SYMBOLS = ["SOLUSDT", "XRPUSDT", "DOGEUSDT", "NEARUSDT", "ICPUSDT", "DOTUSDT", "ETCUSDT"]
 ANCHOR = "BTCUSDT"
-FALCON_SYMBOLS = ["BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "ADAUSDT", "LINKUSDT"]
+# FALCON: العملات القيادية الأقوى في الاتجاه والاختراق
+FALCON_SYMBOLS = ["BTCUSDT", "ETHUSDT", "LINKUSDT", "SOLUSDT"]
 ALL_SYMBOLS = sorted(set(DAY_SYMBOLS + FALCON_SYMBOLS + [ANCHOR]))
 
 # ── FALCON-DAY params (مجمّدة — لا تُغيَّر إلا بعد إعادة اختبار) ──

@@ -104,7 +104,17 @@ def place_entry(system, sym, side, qty, px, tp, sl, day, hold_hours, leg="",
 def manage_all(market, live_prices=None):
     """إدارة كل المراكز المفتوحة — تعيد قائمة الصفقات المغلقة (للإشعارات)."""
     closed = []
-    for t in db.open_positions():
+    positions = db.open_positions()
+    if not positions:
+        return closed
+    # جلب الأسعار الحية تلقائياً للمراكز إن لم تُمرر
+    if live_prices is None:
+        try:
+            syms = sorted({p["symbol"] for p in positions})
+            live_prices = market.prices(syms)
+        except Exception:
+            live_prices = {}
+    for t in positions:
         try:
             hit = manage_one(market, t, live_prices)
             if hit:
@@ -114,40 +124,54 @@ def manage_all(market, live_prices=None):
     return closed
 
 
-def _trailing_sl(market, t, sl0, atr0):
+def _trailing_sl(market, t, sl0, atr0, live=None):
     """وقف متحرك لساق B: يرتفع مع القمة (أو ينخفض مع القاع) ولا يتراجع أبداً."""
     leg = t.get("leg") or ""
     trail_atr = float(t.get("trail_atr") or 0)
     if leg != "B" or trail_atr <= 0 or atr0 <= 0:
         return sl0, t.get("sl_current")
+    sl_curr = float(t.get("sl_current") or sl0)
+    # تحديث لحظي بالسعر الحي إن توفر
+    if live is not None and live > 0:
+        if t["side"] == 1:
+            cand = live - trail_atr * atr0
+            if cand > sl_curr:
+                return max(sl0, cand), max(sl0, cand)
+        else:
+            cand = live + trail_atr * atr0
+            if cand < sl_curr:
+                return min(sl0, cand), min(sl0, cand)
     entry_t = _tz(t["entry_time"])
     try:
         dfh = market.klines(t["symbol"], "4h", limit=60)
-        # ❗ فقط الشموع اللاحقة للدخول — لا نقرأ ما قبل وجود الصفقة
+        # ❗ فقط الشموع المكتملة بعد الدخول — إسقاط المتشكلة وفلترة ما بعد الدخول
+        dfh = dfh.iloc[:-1].reset_index(drop=True)
         dfh = dfh[dfh["open_time"] >= entry_t]
         if len(dfh):
             ext = float(dfh["high"].max()) if t["side"] == 1 else float(dfh["low"].min())
             cand = ext - trail_atr * atr0 if t["side"] == 1 else ext + trail_atr * atr0
-            new = max(sl0, cand) if t["side"] == 1 else min(sl0, cand)
+            new = max(sl_curr, cand) if t["side"] == 1 else min(sl_curr, cand)
             return new, new
     except Exception:
         pass
-    return sl0, t.get("sl_current")
+    return sl_curr, sl_curr
 
 
 def _closed_candle_view(market, t, sl, tp):
     """
     بديل عند تعذّر الحصول على سعر حي: يقيّم الشموع المكتملة —
-    لكن **فقط** تلك التي أُغلقت بعد لحظة الدخول.
+    لكن **فقط** تلك التي بدأت وأُغلقت بالكامل بعد لحظة الدخول.
     """
     entry_t = _tz(t["entry_time"])
     try:
-        df = market.klines(t["symbol"], "15m", limit=6)
+        df = market.klines(t["symbol"], "15m", limit=10)
     except Exception:
         return None
-    df = df[df["open_time"] + timedelta(minutes=15) > entry_t]
+    # إسقاط الشمعة الحالية غير المكتملة لمنع قراءة بيانات قبل الدخول
+    df = df.iloc[:-1].reset_index(drop=True)
+    df = df[df["open_time"] >= entry_t]
     if df.empty:
-        return None                       # لم يمرّ وقت كافٍ بعد الدخول
+        return None                       # لم تكتمل شمعة بعد لحظة الدخول
     last = df.iloc[-1]
     hit = ex.evaluate_bar(t["side"], tp, sl,
                           float(last["open"]), float(last["high"]),
@@ -161,49 +185,83 @@ def manage_one(market, t, live_prices=None):
     يدير مركزاً واحداً.
 
     live_prices: قاموس {symbol: last_price} من حلقة المراقبة السريعة.
-    عند توفّره نستخدم السعر الحي (أدق)، وإلا نسقط على الشموع المكتملة
-    مع شرط صارم: لا نقيّم إلا ما بعد `entry_time`.
+    يستخدم السعر اللحظي الحي حصراً لتقييم الهدف والوقف وتأمين الأرباح (Breakeven).
     """
     sym, side = t["symbol"], t["side"]
     entry_t = _tz(t["entry_time"])
     now = datetime.now(timezone.utc)
 
-    # ❗ الحاجز الزمني: لا يمكن إغلاق صفقة قبل أن تُفتح (كان هذا هو الخلل الأكبر)
+    # ❗ الحاجز الزمني: لا يمكن إغلاق صفقة قبل أن تُفتح
     if entry_t and now <= entry_t:
         return None
 
+    entry_px = float(t["entry"])
     sl0, tp = float(t["sl"]), float(t["tp"])
     atr0 = float(t.get("atr0") or 0)
-    sl, sl_current = _trailing_sl(market, t, sl0, atr0)
+
+    # جلب السعر الحي من القاموس أو الكاش أو نداء مباشر للسوق
+    live = (live_prices or {}).get(sym)
+    if live is None:
+        try:
+            from .cache import cache
+            cached = cache.get(f"ct:px:{sym}")
+            if cached is not None:
+                live = float(cached)
+            else:
+                live = float(market.price(sym))
+        except Exception:
+            live = None
+
+    sl, sl_current = _trailing_sl(market, t, sl0, atr0, live=live)
+
+    # ── تأمين المركز بنقطة التعادل (Breakeven) عند تحقيق 50% من الهدف ──
+    if live is not None and config.BREAKEVEN_ENABLED and tp > 0:
+        tp_dist = abs(tp - entry_px)
+        if tp_dist > 0:
+            progress = side * (live - entry_px)
+            if progress >= config.BREAKEVEN_TRIGGER_RATIO * tp_dist:
+                cand_be = entry_px
+                if side == 1 and cand_be > sl:
+                    sl = cand_be
+                    sl_current = cand_be
+                elif side == -1 and cand_be < sl:
+                    sl = cand_be
+                    sl_current = cand_be
+
     if sl_current is not None and sl != sl0:
         try:
-            db.update_sl(t["id"], sl)     # نحفظ الوقف المتحرك للتدقيق
+            db.update_sl(t["id"], sl)     # نحفظ الوقف الجديد للتدقيق
         except Exception:
             pass
 
     hit = None
-    live = (live_prices or {}).get(sym)
+    exit_px_live = None
 
-    if live:
-        # ── المسار الدقيق: السعر الحي ──
-        # الترتيب متحفّظ: الوقف أولاً (إن ضُربا معاً نفترض الأسوأ)
+    if live is not None:
+        # ── المسار الدقيق والرئيسي: السعر الحي ──
         if side == 1:
             if live <= sl:
-                hit = ("TSL" if sl > sl0 else "SL", min(live, sl))   # فجوة → السعر المتاح
+                is_be = (sl >= entry_px - 1e-5 and sl > sl0)
+                is_tsl = (sl > sl0 and not is_be)
+                reason = "BE" if is_be else ("TSL" if is_tsl else "SL")
+                hit = (reason, min(live, sl))   # فجوة → السعر المتاح
             elif tp > 0 and live >= tp:
-                hit = ("TP", tp)                                      # أمر LIMIT
+                hit = ("TP", tp)                # أمر LIMIT
         else:
             if live >= sl:
-                hit = ("TSL" if sl < sl0 else "SL", max(live, sl))
+                is_be = (sl <= entry_px + 1e-5 and sl < sl0)
+                is_tsl = (sl < sl0 and not is_be)
+                reason = "BE" if is_be else ("TSL" if is_tsl else "SL")
+                hit = (reason, max(live, sl))
             elif tp > 0 and live <= tp:
                 hit = ("TP", tp)
         exit_px_live = live
     else:
-        # ── المسار الاحتياطي: آخر شمعة مكتملة بعد الدخول ──
+        # ── المسار الاحتياطي: فقط في حال انقطاع الشبكة كلياً عن السعر الحي ──
+        # مع شرط صارم: الشمعة المكتملة بدأت بعد الدخول
         r = _closed_candle_view(market, t, sl, tp)
         if r:
             hit = r
-        exit_px_live = None
 
     if hit is None:
         age_h = (now - entry_t).total_seconds() / 3600

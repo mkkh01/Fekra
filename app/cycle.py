@@ -11,7 +11,7 @@
 import time
 import traceback
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from . import config, db, notify, trader, strategy as st
 from .cache import cache
@@ -122,8 +122,16 @@ def run_cycle(note=""):
             else:
                 summ["reject_falcon"] = {"system-disabled": 1}
 
-        # ── 5) إدارة (تعمل دائماً حتى في الإيقاف) ──
-        for tr in trader.manage_all(md):
+        # ── 5) إدارة (تعمل دائماً حتى في الإيقاف — مع تمرير الأسعار الحية) ──
+        open_positions = db.open_positions()
+        live_manage = {}
+        if open_positions:
+            try:
+                syms_manage = sorted({p["symbol"] for p in open_positions})
+                live_manage = md.prices(syms_manage)
+            except Exception:
+                live_manage = {}
+        for tr in trader.manage_all(md, live_prices=live_manage):
             summ["closed"] += 1
             summ["closed_day" if tr.get("system") == "DAY" else "closed_falcon"] += 1
             _send(notify.t_close(tr))
@@ -211,6 +219,13 @@ def _scan_day(md, today, equity, summ, send, open_pos, counts):
                 rej[f"risk-{why}"] += 1
                 continue
 
+            # 1. فحص حداثة الشمعة: نرفض الإشارة إذا أغلقت الشمعة منذ وقت طويل
+            candle_close_t = df.iloc[-1]["open_time"] + timedelta(minutes=15)
+            signal_age_sec = (datetime.now(timezone.utc) - candle_close_t).total_seconds()
+            if signal_age_sec > config.SIGNAL_MAX_AGE_SEC_DAY:
+                rej["signal-stale"] += 1
+                continue
+
             # ✅ التنفيذ على السعر الحي (ask/bid) لا على إغلاق الشمعة
             sl_d = p["sl_atr"] * a
             est_qty = trader.position_size(equity, p["risk_per_trade"], sl_d, px_sig)
@@ -219,6 +234,13 @@ def _scan_day(md, today, equity, summ, send, open_pos, counts):
                 continue
             px, meta = trader.quote_entry(md, sym_, side, est_qty * px_sig)
             meta["entry_ref"] = float(px_sig)
+
+            # 2. فحص انحراف السعر الحي عن سعر الإشارة (منع الشراء من القمة)
+            drift_pct = abs(px - px_sig) / px_sig
+            if drift_pct > config.MAX_PRICE_DRIFT_PCT:
+                rej["price-drifted"] += 1
+                continue
+
             qty = trader.position_size(equity, p["risk_per_trade"], abs(px - (px - side * sl_d)), px)
             if qty <= 0:
                 rej["risk-size"] += 1
@@ -266,19 +288,35 @@ def _scan_falcon(md, today, equity, summ, send, open_pos, counts):
             if any(x["symbol"] == sym_ and x["system"] == "FALCON" for x in open_pos):
                 rej["anti-double"] += 1
                 continue
+
+            # 1. فحص حداثة الشمعة لـ FALCON (4 ساعات)
+            candle_close_t = df.iloc[-1]["open_time"] + timedelta(hours=4)
+            signal_age_sec = (datetime.now(timezone.utc) - candle_close_t).total_seconds()
+            if signal_age_sec > config.SIGNAL_MAX_AGE_SEC_FALCON:
+                rej["signal-stale"] += 1
+                continue
+
             signal_key = f"FALCON:{sym_}:{side}:{df.iloc[-1]['open_time'].isoformat()}"
             sl_d = p["sl_atr"] * a
 
             px, meta = trader.quote_entry(md, sym_, side,
                                           p["risk_per_trade"] * equity)
             meta["entry_ref"] = float(px_sig)
+
+            # 2. فحص انحراف السعر الحي عن سعر الإشارة
+            drift_pct = abs(px - px_sig) / px_sig
+            if drift_pct > config.MAX_PRICE_DRIFT_PCT * 1.5:
+                rej["price-drifted"] += 1
+                continue
+
+            sl_target = px - side * sl_d
             opened_any = False
-            for leg, frac, tp in (("A", 0.5, px + p["tp_atr"] * a), ("B", 0.5, None)):
+            for leg, frac, tp in (("A", 0.5, px + side * p["tp_atr"] * a), ("B", 0.5, None)):
                 qty = trader.position_size(equity, p["risk_per_trade"] * frac, sl_d, px)
                 if qty <= 0:
                     rej["risk-size"] += 1
                     continue
-                tr = trader.place_entry("FALCON", sym_, side, qty, px, tp or 0, px - sl_d,
+                tr = trader.place_entry("FALCON", sym_, side, qty, px, tp or 0, sl_target,
                                         today, p["max_hold_bars"] * 4, leg=leg,
                                         trail_atr=p["trail_atr"] if leg == "B" else 0,
                                         atr_now=a, reason_ar=FALCON_AR, bump=(leg == "A"),
