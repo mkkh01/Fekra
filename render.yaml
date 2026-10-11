@@ -7,9 +7,11 @@ services:
     runtime: python
     plan: starter            # المجانية تنام وتوقف الدورات — Starter إجباري لـ 24/7
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app.main:app --workers 1 --bind 0.0.0.0:$PORT --timeout 180
+    startCommand: gunicorn --config gunicorn.conf.py app.main:app
     healthCheckPath: /health
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
       - key: WEB_CONCURRENCY
         value: 1
       - key: DATABASE_URL        # رابط Postgres (pooler)
@@ -18,8 +20,10 @@ services:
         sync: false
       - key: BOT_TOKEN
         sync: false
-      - key: ADMIN_CHAT_ID       # إجباري
+      - key: ADMIN_CHAT_ID       # اترك فارغاً للتسجيل التلقائي عبر /start أو اكتب المعرف يدوياً
         sync: false
+      - key: ALLOW_AUTO_ADMIN
+        value: 1
       - key: PUBLIC_URL
         sync: false
       - key: WEBHOOK_SECRET      # إجباري لحماية نقطة الويب هوك
@@ -35,7 +39,7 @@ services:
       - key: RUN_SCHEDULER
         value: 1
       - key: ENABLE_DAY
-        value: 1          # تم تفعيله بعد إعادة المعايرة وتصفية قائمة الرموز (WR=71.6%)
+        value: 1          # تم تفعيله بعد إعادة المعايرة وتصفية قائمة الرموز
       - key: ENABLE_FALCON
         value: 1
       - key: FUNDING_ENABLED

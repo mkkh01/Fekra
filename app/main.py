@@ -48,7 +48,9 @@ def _guard():
 # ────────────────────────────── المسارات ──────────────────────────────
 @app.get("/")
 def index():
-    _guard()
+    if not _authorized():
+        return (f"<h2>🦅 CT — FALCON Paper Trading</h2>"
+                f"<p>status: active | health: <a href='/health'>/health</a></p>"), 200
     try:
         c = db.last_cycle()
         pos = db.open_positions()
@@ -169,13 +171,15 @@ def _monitor_loop():
 
 
 _booted = False
+_boot_lock = threading.Lock()
 
 
 def boot():
     global _booted
-    if _booted:
-        return
-    _booted = True
+    with _boot_lock:
+        if _booted:
+            return
+        _booted = True
     try:
         errs = db.ensure_schema()
         print(f"[schema] {'FAILED: ' + '; '.join(errs) if errs else 'ok'}", flush=True)
@@ -200,8 +204,12 @@ def boot():
     print(f"monitor: ON ({config.MONITOR_INTERVAL_SEC}s)", flush=True)
 
 
-boot()
+@app.before_request
+def _ensure_booted():
+    if not _booted:
+        boot()
 
 
 if __name__ == "__main__":
+    boot()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")))
