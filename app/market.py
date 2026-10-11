@@ -15,10 +15,15 @@ from . import config
 
 
 class VisionMarket:
-    # الأوّل هو المصدر الرسمي للبيانات العامة؛ الباقي بدائل احتياطية.
+    # الأوّل هو المصدر الرسمي للبيانات العامة؛ الباقي بدائل احتياطية موثوقة.
     BASES = ("https://data-api.binance.vision",
+             "https://api1.binance.com",
+             "https://api2.binance.com",
+             "https://api3.binance.com",
              "https://api.binance.com",
              "https://www.binance.com")
+
+    _cooldown_until = 0
 
     def __init__(self, timeout=None):
         self.sess = requests.Session()
@@ -35,10 +40,21 @@ class VisionMarket:
             return self.BASES
 
     def _get(self, path, **kwargs):
+        import time
+        now = time.time()
+        if now < VisionMarket._cooldown_until:
+            rem = int(VisionMarket._cooldown_until - now)
+            raise requests.HTTPError(f"Binance 429 backoff active ({rem}s remaining)")
+
         last = None
         for base in self._order():
             try:
                 r = self.sess.get(f"{base}{path}", **kwargs)
+                if r.status_code == 429:
+                    retry_after = int(r.headers.get("Retry-After", "60"))
+                    cool = max(30, retry_after)
+                    VisionMarket._cooldown_until = time.time() + cool
+                    raise requests.HTTPError(f"429 from {base} (cooling down {cool}s)")
                 if r.status_code != 200:
                     last = requests.HTTPError(f"{r.status_code} from {base}")
                     continue

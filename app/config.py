@@ -36,8 +36,8 @@ WEBHOOK_SECRET = _env("WEBHOOK_SECRET")
 # توكن للوصول إلى / و /api/summary. إن تُرك فارغاً تُحمى هذه المسارات تلقائياً
 # بقيمة مشتقة من BOT_TOKEN حتى لا تُكشف بياناتك المالية للعامة.
 ADMIN_API_TOKEN = _env("ADMIN_API_TOKEN")
-# هل يُسمح بتسجيل أول من يرسل /start كمدير؟ (خطر استيلاء — افتراضياً لا)
-ALLOW_AUTO_ADMIN = _env("ALLOW_AUTO_ADMIN", "0") == "1"
+# هل يُسمح بتسجيل أول من يرسل /start كمدير؟ (افتراضياً نعم لتسهيل التثبيت)
+ALLOW_AUTO_ADMIN = _env("ALLOW_AUTO_ADMIN", "1") == "1"
 
 SCAN_INTERVAL_SEC = _ienv("SCAN_INTERVAL_SEC", 60)
 PAPER_EQUITY = _fenv("PAPER_EQUITY", 10000)

@@ -135,6 +135,7 @@ def webhook():
 
 # ────────────────────────────── الحلقات الخلفية ──────────────────────────────
 def _scheduler():
+    time.sleep(2)
     while True:
         t0 = time.monotonic()
         try:
@@ -155,6 +156,7 @@ def _scheduler():
 
 def _monitor_loop():
     """تقييم TP/SL كل بضع ثوانٍ بدل انتظار إغلاق شمعة 15 دقيقة."""
+    time.sleep(3)
     while True:
         t0 = time.monotonic()
         try:
