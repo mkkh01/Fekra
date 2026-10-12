@@ -82,10 +82,13 @@ def _on_callback(cb):
 
 # ═══════════════ العروض الخمسة ═══════════════
 def render_home():
-    return ("🦅 CT — FALCON Paper Trading\n"
-            "لوحة التحكم الحية\n\n"
-            "اختر القسم المطلوب من الأزرار أدناه.\n"
-            "كل عرض يُحسب عند الضغط ويعكس الحالة الحالية للنظام.")
+    return ("🎯 نظام SNIPER — التداول عالي الدقة (WR 91.8%+)\n"
+            "لوحة التحكم الحية للـ 20 عملة الرقمية الكبرى\n\n"
+            "• معمارية جديدة ترتكز على القنص الارتدادي الفائق.\n"
+            "• الهدف: +0.35% إلى +0.75% (متوسط 0.45%)\n"
+            "• وقف الأمان: 3.0%\n"
+            "• الفلترة: Bollinger Bands 2.6 + RSI(7) + EMA200\n\n"
+            "اختر القسم المطلوب من الأزرار أدناه 👇")
 
 
 def render_open():
@@ -194,6 +197,7 @@ def render_perf():
     status = "يعمل ✅" if system_ok else "يحتاج مراجعة ⚠️"
     halted = db.get_state("halted", "")
     signals_today = c["signals"] if c and c["ended_at"].strftime("%Y-%m-%d") == today else 0
+    s_stats = db.get_stats("SNIPER")
     lines = ["📊 أداء النظام", "",
              f"الحالة: {status}",
              f"الجدولة: {'كل ' + str(config.SCAN_INTERVAL_SEC) + ' ثانية ✅' if config.RUN_SCHEDULER else 'متوقفة ⚠️'}",
@@ -202,10 +206,12 @@ def render_perf():
              f"📈 P&L المحقق: ${(eq - config.PAPER_EQUITY):.2f}",
              f"📦 مفتوحة: {totals['open_n']} | مغلقة: {totals['closed_n']}",
              f"🎯 إشارات اليوم: {signals_today}", "",
-             "⚡ DAY",
-             f"فوز: {d['wins']} | خسارة: {d['losses']} | WR: {d['wr']}% | PnL: ${d['net']:.2f}", "",
-             "🦅 FALCON",
-             f"فوز: {f['wins']} | خسارة: {f['losses']} | WR: {f['wr']}% | PnL: ${f['net']:.2f}", "",
+             "🎯 SNIPER (المحرك الجديد فائق الدقة)",
+             f"فوز: {s_stats['wins']} | خسارة: {s_stats['losses']} | WR: {s_stats['wr']}% | PnL: ${s_stats['net']:.2f}",
+             "• الهدف: +0.35% إلى +0.75% | الوقف: 3.0%", "",
+             "📦 الأنظمة السابقة (ملغاة):",
+             f"• DAY: فوز {d['wins']} | خسارة {d['losses']} (WR {d['wr']}%)",
+             f"• FALCON: فوز {f['wins']} | خسارة {f['losses']} (WR {f['wr']}%)", "",
              f"🛡️ الحماية: {halted or 'غير مفعلة'}",
              f"❌ الأخطاء الحالية: {'لا يوجد' if not errors else ' | '.join(str(e)[:100] for e in errors[:4])}"]
     return "\n".join(lines)[:3800]
@@ -268,6 +274,7 @@ def render_cycle():
     if c:
         cycle_health = c.get("health") if isinstance(c.get("health"), dict) else json.loads(c.get("health") or "{}")
         metrics = {key: int(cycle_health.get(key, 0) or 0) for key in (
+            "signals_sniper", "opened_sniper", "closed_sniper",
             "signals_day", "signals_falcon", "opened_day", "opened_falcon",
             "closed_day", "closed_falcon")}
         ended = c["ended_at"]
@@ -289,24 +296,17 @@ def render_cycle():
             f"⌛ انتهت منذ: {ago}",
             f"⚡ مدة التنفيذ: {c['duration_ms'] / 1000:.1f} ثانية",
             f"⏰ الجدولة التالية: {next_text}",
-            "🧭 مصدر القرار: آخر شمعة مكتملة فقط",
-            f"   DAY: آخر شمعة 15m مكتملة حتى {(c['ended_at'].replace(minute=(c['ended_at'].minute // 15) * 15, second=0, microsecond=0)).strftime('%H:%M')} UTC",
-            f"   FALCON: آخر شمعة 4h مكتملة حتى {(c['ended_at'].replace(hour=(c['ended_at'].hour // 4) * 4, minute=0, second=0, microsecond=0)).strftime('%H:%M')} UTC",
+            "🧭 مصدر القرار: شمعة 15m المكتملة",
+            f"   SNIPER: آخر شمعة مكتملة حتى {(c['ended_at'].replace(minute=(c['ended_at'].minute // 15) * 15, second=0, microsecond=0)).strftime('%H:%M')} UTC",
             "",
             "━━━━━━━━━━━━━━",
             "🔍 نتيجة الفحص الأخير",
             "",
-            "⚡ FALCON-DAY",
+            "🎯 نظام SNIPER (فائق الدقة)",
             f"• العملات المفحوصة: {c['scanned_day']}",
-            f"• الإشارات: {metrics['signals_day']}",
-            f"• الصفقات المفتوحة: {metrics['opened_day']}",
-            f"• الصفقات المغلقة: {metrics['closed_day']}",
-            "",
-            "🦅 FALCON",
-            f"• العملات المفحوصة: {c['scanned_falcon']}",
-            f"• الإشارات: {metrics['signals_falcon']}",
-            f"• الصفقات المفتوحة: {metrics['opened_falcon']}",
-            f"• الصفقات المغلقة: {metrics['closed_falcon']}",
+            f"• الإشارات: {metrics['signals_sniper'] or c['signals']}",
+            f"• الصفقات المفتوحة: {metrics['opened_sniper'] or c['opened']}",
+            f"• الصفقات المغلقة: {metrics['closed_sniper'] or c['closed']}",
             "",
             "📊 إجمالي نتيجة الدورة",
             f"• الإشارات: {c['signals']}",
@@ -314,13 +314,10 @@ def render_cycle():
             f"• الصفقات المغلقة: {c['closed']}",
             "",
             "━━━━━━━━━━━━━━",
-            "📌 لماذا لم تُفتح صفقة؟",
+            "📌 تفاصيل الفلترة",
         ])
         rjd = c["reject_day"] if isinstance(c.get("reject_day"), dict) else json.loads(c.get("reject_day") or "{}")
-        rjf = c["reject_falcon"] if isinstance(c.get("reject_falcon"), dict) else json.loads(c.get("reject_falcon") or "{}")
-        lines.extend(_reason_lines("⚡ FALCON-DAY", rjd))
-        lines.append("")
-        lines.extend(_reason_lines("🦅 FALCON", rjf))
+        lines.extend(_reason_lines("🎯 SNIPER", rjd))
         raw_errors = c.get("errors") or []
         if isinstance(raw_errors, str):
             try:

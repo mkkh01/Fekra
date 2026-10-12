@@ -34,10 +34,12 @@ def _bars(md, sym, tf, need):
 def run_cycle(note=""):
     started = datetime.now(timezone.utc)
     t0 = time.monotonic()
-    summ = dict(scanned_day=0, scanned_falcon=0, signals=0, opened=0, closed=0,
-                signals_day=0, signals_falcon=0, opened_day=0, opened_falcon=0,
-                closed_day=0, closed_falcon=0,
-                health={}, errors=[], reject_day={}, reject_falcon={})
+    summ = dict(scanned_day=0, scanned_falcon=0, scanned_sniper=0,
+                signals=0, opened=0, closed=0,
+                signals_day=0, signals_falcon=0, signals_sniper=0,
+                opened_day=0, opened_falcon=0, opened_sniper=0,
+                closed_day=0, closed_falcon=0, closed_sniper=0,
+                health={}, errors=[], reject_day={}, reject_falcon={}, reject_sniper={})
     if not cache.acquire("ct:cycle:lock", ttl=300):
         summ["errors"].append("lock-busy: دورة سابقة ما زالت تعمل")
         summ["health"] = {"cycle": "skip"}
@@ -112,7 +114,11 @@ def run_cycle(note=""):
         if halted:
             summ["errors"].append(f"halted: {halted} (الفتح متوقف)")
         else:
-            counts = db.day_counts_map(today, ["DAY", "FALCON"])
+            counts = db.day_counts_map(today, ["SNIPER", "DAY", "FALCON"])
+            if getattr(config, "ENABLE_SNIPER", True):
+                open_pos = _scan_sniper(md, today, equity, summ, _send, open_pos, counts)
+            else:
+                summ["reject_sniper"] = {"system-disabled": 1}
             if config.ENABLE_DAY:
                 open_pos = _scan_day(md, today, equity, summ, _send, open_pos, counts)
             else:
@@ -133,7 +139,13 @@ def run_cycle(note=""):
                 live_manage = {}
         for tr in trader.manage_all(md, live_prices=live_manage):
             summ["closed"] += 1
-            summ["closed_day" if tr.get("system") == "DAY" else "closed_falcon"] += 1
+            sys_name = tr.get("system", "")
+            if sys_name == "SNIPER":
+                summ["closed_sniper"] = summ.get("closed_sniper", 0) + 1
+            elif sys_name == "DAY":
+                summ["closed_day"] += 1
+            else:
+                summ["closed_falcon"] += 1
             _send(notify.t_close(tr))
 
         # ── 6) رصيد + إيقاف ──
@@ -168,7 +180,11 @@ def _finish(summ, started, note, t0=None):
     ended = datetime.now(timezone.utc)
     summ["duration_ms"] = int((time.monotonic() - t0) * 1000)
     try:
+        scanned_primary = summ.get("scanned_sniper") or summ.get("scanned_day", 0)
         cycle_health = dict(summ["health"],
+                            signals_sniper=summ.get("signals_sniper", 0),
+                            opened_sniper=summ.get("opened_sniper", 0),
+                            closed_sniper=summ.get("closed_sniper", 0),
                             signals_day=summ.get("signals_day", 0),
                             signals_falcon=summ.get("signals_falcon", 0),
                             opened_day=summ.get("opened_day", 0),
@@ -177,9 +193,10 @@ def _finish(summ, started, note, t0=None):
                             closed_falcon=summ.get("closed_falcon", 0))
         db.save_cycle(dict(started_at=started, ended_at=ended,
                            duration_ms=summ["duration_ms"],
-                           scanned_day=summ["scanned_day"],
+                           scanned_day=scanned_primary,
                            scanned_falcon=summ["scanned_falcon"],
-                           reject_day=summ["reject_day"], reject_falcon=summ["reject_falcon"],
+                           reject_day=summ.get("reject_sniper", summ.get("reject_day", {})),
+                           reject_falcon=summ["reject_falcon"],
                            signals=summ["signals"], opened=summ["opened"],
                            closed=summ["closed"], health=cycle_health,
                            errors=summ["errors"][:10],
@@ -187,6 +204,81 @@ def _finish(summ, started, note, t0=None):
     except Exception as e:
         print(f"[cycle-save-failed] {e}", flush=True)
     return summ
+
+
+def _scan_sniper(md, today, equity, summ, send, open_pos, counts):
+    p = config.SNIPER
+    rej = Counter()
+    symbols = getattr(config, "SNIPER_SYMBOLS", config.ALL_SYMBOLS)
+    for sym_ in symbols:
+        summ["scanned_sniper"] = summ.get("scanned_sniper", 0) + 1
+        try:
+            df = _bars(md, sym_, "15m", 250)
+            side, px_sig, tp_sig, sl_sig, dbg = st.sniper_scan_debug(df, p)
+            if dbg.get("reject"):
+                rej[dbg["reject"]] += 1
+            if side == 0:
+                continue
+
+            summ["signals"] += 1
+            summ["signals_sniper"] = summ.get("signals_sniper", 0) + 1
+
+            if any(x["symbol"] == sym_ and x.get("system") == "SNIPER" for x in open_pos):
+                rej["anti-double"] += 1
+                continue
+
+            ok, why = trader.can_open(today, "SNIPER", sym_, open_pos, counts)
+            if not ok:
+                rej[f"risk-{why}"] += 1
+                continue
+
+            # 1. فحص حداثة الشمعة لـ SNIPER (15 دقيقة)
+            candle_close_t = df.iloc[-1]["open_time"] + timedelta(minutes=15)
+            signal_age_sec = (datetime.now(timezone.utc) - candle_close_t).total_seconds()
+            if signal_age_sec > config.SIGNAL_MAX_AGE_SEC_DAY:
+                rej["signal-stale"] += 1
+                continue
+
+            # 2. حجم المركز (مخاطرة 1% لكل صفقة)
+            sl_dist = abs(px_sig - sl_sig)
+            est_qty = trader.position_size(equity, p["risk_per_trade"], sl_dist, px_sig)
+            if est_qty <= 0:
+                rej["risk-size"] += 1
+                continue
+
+            # 3. التنفيذ على السعر الحي (ask/bid)
+            px, meta = trader.quote_entry(md, sym_, side, est_qty * px_sig)
+            if abs(px - px_sig) / px_sig > config.MAX_PRICE_DRIFT_PCT:
+                rej["drift"] += 1
+                continue
+
+            actual_qty = trader.position_size(equity, p["risk_per_trade"], sl_dist, px)
+            if actual_qty <= 0:
+                rej["risk-size-live"] += 1
+                continue
+
+            tp_pct = abs(tp_sig / px_sig - 1.0)
+            sl_pct = abs(sl_sig / px_sig - 1.0)
+            live_tp = px * (1.0 + tp_pct) if side == 1 else px * (1.0 - tp_pct)
+            live_sl = px * (1.0 - sl_pct) if side == 1 else px * (1.0 + sl_pct)
+
+            signal_key = f"SNIPER:{sym_}:{side}:{df.iloc[-1]['open_time'].isoformat()}"
+            tr = trader.place_entry(
+                "SNIPER", sym_, side, actual_qty, px, live_tp, live_sl,
+                today, hold_hours=p.get("max_hold_bars", 48) // 4, leg="",
+                reason_ar="قنص ارتدادي عالي الدقة (BB + RSI + EMA200) 🎯",
+                signal_key=signal_key, meta=meta
+            )
+            if tr:
+                open_pos.append(tr)
+                counts[("SNIPER", sym_)] = counts.get(("SNIPER", sym_), 0) + 1
+                summ["opened"] += 1
+                summ["opened_sniper"] = summ.get("opened_sniper", 0) + 1
+                send(notify.t_open(tr))
+        except Exception as e:
+            summ["errors"].append(f"SNIPER-{sym_}: {e}"[:120])
+    summ["reject_sniper"] = dict(rej)
+    return open_pos
 
 
 def _scan_day(md, today, equity, summ, send, open_pos, counts):

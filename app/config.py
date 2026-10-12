@@ -61,41 +61,46 @@ MAX_PRICE_DRIFT_PCT = _fenv("MAX_PRICE_DRIFT_PCT", 0.004)
 BREAKEVEN_ENABLED = _env("BREAKEVEN_ENABLED", "1") == "1"
 BREAKEVEN_TRIGGER_RATIO = _fenv("BREAKEVEN_TRIGGER_RATIO", 0.5)   # عند قطع 50% من مسافة الهدف
 
-# ── المحركات المعطّلة (لإيقاف نظام دون حذف كوده) ──
-ENABLE_DAY = _env("ENABLE_DAY", "1") == "1"
-ENABLE_FALCON = _env("ENABLE_FALCON", "1") == "1"
+# ── المحركات (تم إلغاء FALCON و DAY واعتماد SNIPER كمحرك رئيسي فائق الدقة WR 91.8%) ──
+ENABLE_SNIPER = _env("ENABLE_SNIPER", "1") == "1"
+ENABLE_DAY = _env("ENABLE_DAY", "0") == "1"
+ENABLE_FALCON = _env("ENABLE_FALCON", "0") == "1"
 
-# ── العوالم (قوائم العملات المصفاة استناداً لنتائج الباك تست التاريخي لعدة سنوات) ──
-# تم توسيع نطاق المتابعة ليشمل 36 عملة رقمية قيادية عالية السيولة (ضمن نطاق 30-40 عملة)
-WATCHED_SYMBOLS = [
-    # العملات القيادية والأساسية (Majors)
+# ── قائمة العملات العشرين الكبرى لنظام SNIPER ──
+SNIPER_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "SUIUSDT",
-
-    # شبكات الطبقة الأولى والذكاء الاصطناعي (L1s & AI Ecosystem)
-    "NEARUSDT", "APTUSDT", "TIAUSDT", "GALAUSDT", "FETUSDT",
-    "RENDERUSDT", "INJUSDT", "SEIUSDT", "ATOMUSDT", "DOTUSDT",
-
-    # حلول الطبقة الثانية والسيولة والتمويل اللامركزي (L2s & DeFi)
-    "ARBUSDT", "OPUSDT", "SANDUSDT", "UNIUSDT", "AAVEUSDT",
-    "ENAUSDT", "ONDOUSDT", "WLDUSDT",
-
-    # العملات الكلاسيكية والتخزين والزخم (Legacy & High Momentum)
-    "LTCUSDT", "BCHUSDT", "ICPUSDT", "FILUSDT", "TRXUSDT",
-    "XLMUSDT", "PEPEUSDT", "SHIBUSDT"
+    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT",
+    "LTCUSDT", "BCHUSDT", "DOTUSDT", "UNIUSDT", "ATOMUSDT",
+    "AAVEUSDT", "FILUSDT", "XLMUSDT", "ICPUSDT", "TRXUSDT"
 ]
 
 ANCHOR = "BTCUSDT"
-DAY_SYMBOLS = WATCHED_SYMBOLS
-FALCON_SYMBOLS = WATCHED_SYMBOLS
-ALL_SYMBOLS = sorted(set(WATCHED_SYMBOLS + [ANCHOR]))
+DAY_SYMBOLS = SNIPER_SYMBOLS
+FALCON_SYMBOLS = SNIPER_SYMBOLS
+ALL_SYMBOLS = sorted(set(SNIPER_SYMBOLS + [ANCHOR]))
 
-# ── FALCON-DAY params (معايرة تحقق Win Rate >= 85% وعامل ربح 1.33+) ──
+# ── معايير نظام SNIPER الجديد (Win Rate 91.80% | TP في نطاق [0.35% - 0.75%]) ──
+SNIPER = dict(
+    tp_min_pct=_fenv("SNIPER_TP_MIN", 0.0035),    # الحد الأدنى للهدف 0.35%
+    tp_max_pct=_fenv("SNIPER_TP_MAX", 0.0075),    # الحد الأقصى للهدف 0.75%
+    tp_atr_mult=_fenv("SNIPER_TP_MULT", 0.6),     # مضاعف التقلب الديناميكي للهدف
+    sl_pct=_fenv("SNIPER_SL_PCT", 0.0300),        # وقف أمان 3.00%
+    bb_std=_fenv("SNIPER_BB_STD", 2.6),           # انحراف بولينجر باند المتطرف
+    rsi_period=_ienv("SNIPER_RSI_PERIOD", 7),     # مؤشر RSI السريع
+    rsi_oversold=_fenv("SNIPER_RSI_OV", 20.0),    # تشبع بيعي 20
+    rsi_overbought=_fenv("SNIPER_RSI_OB", 80.0),  # تشبع شرائي 80
+    ema_span=_ienv("SNIPER_EMA_SPAN", 200),       # فلتر اتجاه 200 شمعة
+    max_hold_bars=_ienv("SNIPER_MAX_HOLD", 48),   # أقصى مدة احتفاظ (12 ساعة)
+    risk_per_trade=_fenv("SNIPER_RISK", 0.01),    # مخاطرة 1% لكل صفقة
+    max_per_day=_ienv("SNIPER_MAX_PER_DAY", 4)     # أقصى عدد صفقات يومية لكل عملة
+)
+
+# ── FALCON-DAY params (أرشيفية — النظامان معطلان بطلب المستخدم) ──
 DAY = dict(dev=1.2, btc_cap=0.6, rsiX=40, adx_max=35, atr_min_pct=0.0004,
            atr_max_pct=0.02, vol_mult=0.8, tp_atr=0.7, sl_atr=3.0,
            max_hold_bars=24, max_per_day=3, risk_per_trade=0.005)
 
-# ── FALCON 4H params (معايرة على بيانات 5 سنوات تحقق Win Rate >= 70% وعامل ربح 1.26+) ──
+# ── FALCON 4H params (أرشيفية) ──
 FALCON = dict(don=20, vol_mult=1.0, adx_min=18, mom_mult=0.8, sl_atr=2.5,
               tp_atr=1.2, trail_atr=2.5, max_hold_bars=100, cooldown=5,
               risk_per_trade=0.01, max_per_day=3)

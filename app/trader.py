@@ -54,8 +54,12 @@ def can_open(day, system, symbol, open_positions=None, day_counts=None):
     """
     نسخة مجمّعة: تستقبل المراكز والعدادات جاهزة بدل استعلام لكل رمز (N+1).
     """
-    maxd = (config.DAY["max_per_day"] if system == "DAY"
-            else config.FALCON.get("max_per_day", 3))
+    if system == "SNIPER":
+        maxd = getattr(config, "SNIPER", {}).get("max_per_day", 4)
+    elif system == "DAY":
+        maxd = config.DAY["max_per_day"]
+    else:
+        maxd = config.FALCON.get("max_per_day", 3)
     if day_counts is not None:
         n = day_counts.get((system, symbol), 0)
     else:

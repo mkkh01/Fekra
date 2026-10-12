@@ -5,7 +5,7 @@ from . import config
 
 API = "https://api.telegram.org/bot"
 
-AR_SYS = {"DAY": "FALCON-DAY ⚡", "FALCON": "FALCON 🦅"}
+AR_SYS = {"DAY": "FALCON-DAY ⚡", "FALCON": "FALCON 🦅", "SNIPER": "SNIPER 🎯"}
 AR_EXIT = {
     "TP": "تحقق الهدف 🎯",
     "SL": "ضرب الوقف 🛑",

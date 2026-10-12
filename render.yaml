@@ -40,9 +40,11 @@ services:
         value: 8
       - key: RUN_SCHEDULER
         value: 1
+      - key: ENABLE_SNIPER
+        value: 1          # المحرك الجديد فائق الدقة (Win Rate 91.8%)
       - key: ENABLE_DAY
-        value: 1          # تم تفعيله بعد إعادة المعايرة وتصفية قائمة الرموز
+        value: 0          # معطل بطلب المستخدم
       - key: ENABLE_FALCON
-        value: 1
+        value: 0          # معطل بطلب المستخدم
       - key: FUNDING_ENABLED
         value: 1

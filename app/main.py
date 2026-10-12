@@ -92,7 +92,9 @@ def health():
     return jsonify(ok=ok, scheduler=config.RUN_SCHEDULER,
                    interval=config.SCAN_INTERVAL_SEC,
                    monitor=config.MONITOR_INTERVAL_SEC,
-                   engines={"DAY": config.ENABLE_DAY, "FALCON": config.ENABLE_FALCON})
+                   engines={"SNIPER": getattr(config, "ENABLE_SNIPER", True),
+                            "DAY": config.ENABLE_DAY,
+                            "FALCON": config.ENABLE_FALCON})
 
 
 @app.get("/api/summary")
@@ -103,6 +105,7 @@ def api_summary():
         return jsonify(ok=True, equity=db.equity(),
                        realized=db.realized_equity(),
                        open=len(pos),
+                       stats_sniper=db.get_stats("SNIPER"),
                        stats_day=db.get_stats("DAY"),
                        stats_falcon=db.get_stats("FALCON"),
                        last_cycle=db.last_cycle(),
