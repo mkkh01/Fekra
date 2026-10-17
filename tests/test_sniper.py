@@ -34,7 +34,7 @@ def test_sniper_engine_configuration():
     assert "BTCUSDT" in config.SNIPER_SYMBOLS
     assert "ETHUSDT" in config.SNIPER_SYMBOLS
     assert "SOLUSDT" in config.SNIPER_SYMBOLS
-    assert config.SNIPER["tp_min_pct"] == 0.0035
+    assert config.SNIPER["tp_min_pct"] == 0.0045
     assert config.SNIPER["tp_max_pct"] == 0.0075
     assert config.SNIPER["sl_pct"] == 0.030
 

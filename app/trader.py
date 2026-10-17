@@ -17,8 +17,14 @@ RISK = config.RISK
 
 
 def _tz(dt):
-    return dt if (dt is not None and dt.tzinfo) else (
-        dt.replace(tzinfo=timezone.utc) if dt else None)
+    if dt is None:
+        return None
+    if isinstance(dt, str):
+        try:
+            dt = datetime.fromisoformat(dt)
+        except Exception:
+            return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 # ────────────────────────────── التسعير ──────────────────────────────
@@ -248,7 +254,8 @@ def manage_one(market, t, live_prices=None):
                 is_be = (sl >= entry_px - 1e-5 and sl > sl0)
                 is_tsl = (sl > sl0 and not is_be)
                 reason = "BE" if is_be else ("TSL" if is_tsl else "SL")
-                hit = (reason, min(live, sl))   # فجوة → السعر المتاح
+                fill_px = ex.apply_cost(sl, -side, config.SLIPPAGE.get("base_bps", 1.0))
+                hit = (reason, fill_px)
             elif tp > 0 and live >= tp:
                 hit = ("TP", tp)                # أمر LIMIT
         else:
@@ -256,7 +263,8 @@ def manage_one(market, t, live_prices=None):
                 is_be = (sl <= entry_px + 1e-5 and sl < sl0)
                 is_tsl = (sl < sl0 and not is_be)
                 reason = "BE" if is_be else ("TSL" if is_tsl else "SL")
-                hit = (reason, max(live, sl))
+                fill_px = ex.apply_cost(sl, -side, config.SLIPPAGE.get("base_bps", 1.0))
+                hit = (reason, fill_px)
             elif tp > 0 and live <= tp:
                 hit = ("TP", tp)
         exit_px_live = live
@@ -268,15 +276,20 @@ def manage_one(market, t, live_prices=None):
             hit = r
 
     if hit is None:
-        age_h = (now - entry_t).total_seconds() / 3600
-        if age_h >= float(t.get("hold_hours") or 24):
-            px = live or exit_px_live
-            if px is None:
-                try:
-                    px = float(market.klines(sym, "15m", limit=3).iloc[-1]["close"])
-                except Exception:
-                    return None
-            hit = ("TIME", px)
+        hold_h = float(t.get("hold_hours") or 0.0)
+        # فقط إن كانت hold_hours محددة وموجبة يُطبّق انتهاء الوقت — لنظام SNIPER تكون 0 لمنع الإغلاق العشوائي
+        if hold_h > 0:
+            age_h = (now - entry_t).total_seconds() / 3600
+            if age_h >= hold_h:
+                px = live or exit_px_live
+                if px is None:
+                    try:
+                        px = float(market.klines(sym, "15m", limit=3).iloc[-1]["close"])
+                    except Exception:
+                        return None
+                hit = ("TIME", px)
+            else:
+                return None
         else:
             return None
 
@@ -295,6 +308,31 @@ def manage_one(market, t, live_prices=None):
                    round(fee, 2), round(funding, 4))
     db.log_event("EXIT", f"{t['system']} {sym} {reason} @{xp} net={net:.2f} "
                          f"funding={funding:.2f} held={hours:.1f}h")
+    out = dict(t)
+    out.update(status="CLOSED", exit_price=xp, reason=reason, net=round(net, 2),
+               r=round(r, 3), fee=round(fee, 2))
+    return out
+
+
+def force_close(t, xp, reason="FORCE_CLOSE"):
+    """إغلاق فوري لمركز محدد لإنهاء الأنظمة الملغاة أو أوامر الطوارئ."""
+    now = datetime.now(timezone.utc)
+    entry_t = _tz(t.get("entry_time")) or now
+    side = t["side"]
+    qty = float(t["qty"])
+    sl0 = float(t.get("sl") or 0)
+    fee_bps = config.FEE_BPS
+    hours = max(0.0, (now - entry_t).total_seconds() / 3600.0)
+    rate = config.FUNDING_RATE_8H if config.FUNDING_ENABLED else 0.0
+    funding = ex.funding_cost(float(t["entry"]) * qty, hours, rate)
+    net = ex.trade_pnl(side, float(t["entry"]), xp, qty, fee_bps, funding)
+    fee = (float(t["entry"]) * qty + xp * qty) * (fee_bps / 10_000.0)
+    risk_usd = qty * abs(float(t["entry"]) - sl0) if t.get("sl") else 1
+    r = net / risk_usd if risk_usd else 0
+
+    db.close_trade(t["id"], xp, reason, round(net, 2), round(r, 3),
+                   round(fee, 2), round(funding, 4))
+    db.log_event("EXIT", f"{t['system']} {t['symbol']} {reason} @{xp} net={net:.2f}")
     out = dict(t)
     out.update(status="CLOSED", exit_price=xp, reason=reason, net=round(net, 2),
                r=round(r, 3), fee=round(fee, 2))

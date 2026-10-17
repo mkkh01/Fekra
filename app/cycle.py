@@ -137,6 +137,17 @@ def run_cycle(note=""):
                 live_manage = md.prices(syms_manage)
             except Exception:
                 live_manage = {}
+
+        # إغلاق وتصفية أي صفقات قديمة تتبع الأنظمة الملغاة (DAY و FALCON) لتنقية الحساب لمحرك SNIPER
+        for p in list(open_positions):
+            if p.get("system") in ("DAY", "FALCON"):
+                try:
+                    px_now = live_manage.get(p["symbol"]) or float(md.price(p["symbol"]))
+                    tr_closed = trader.force_close(p, px_now, "SYSTEM_RETIRED")
+                    _send(f"🧹 تصفية مركز سابق يتبع النظام الملغى ({p['system']}): {p['symbol']}\nتم الإغلاق بسعر {px_now} لتنقية المحفظة لمحرك SNIPER فقط.")
+                except Exception as e:
+                    summ["errors"].append(f"retire-legacy-{p['symbol']}: {e}"[:100])
+
         for tr in trader.manage_all(md, live_prices=live_manage):
             summ["closed"] += 1
             sys_name = tr.get("system", "")
@@ -259,13 +270,15 @@ def _scan_sniper(md, today, equity, summ, send, open_pos, counts):
 
             tp_pct = abs(tp_sig / px_sig - 1.0)
             sl_pct = abs(sl_sig / px_sig - 1.0)
+            # ضمان أن هدف الربح لا يقل عن 0.45% ليكون صافي الربح بعد الرسوم >= 0.35%
+            tp_pct = max(0.0045, min(0.0075, tp_pct))
             live_tp = px * (1.0 + tp_pct) if side == 1 else px * (1.0 - tp_pct)
             live_sl = px * (1.0 - sl_pct) if side == 1 else px * (1.0 + sl_pct)
 
             signal_key = f"SNIPER:{sym_}:{side}:{df.iloc[-1]['open_time'].isoformat()}"
             tr = trader.place_entry(
                 "SNIPER", sym_, side, actual_qty, px, live_tp, live_sl,
-                today, hold_hours=p.get("max_hold_bars", 48) // 4, leg="",
+                today, hold_hours=0.0, leg="",
                 reason_ar="قنص ارتدادي عالي الدقة (BB + RSI + EMA200) 🎯",
                 signal_key=signal_key, meta=meta
             )

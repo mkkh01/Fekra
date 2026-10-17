@@ -214,9 +214,9 @@ def sniper_scan_debug(df, p):
         short_trend=bool(c[i] <= ema200[i] * 1.01)
     )
 
-    # حساب الهدف بين 0.35% و 0.75%
+    # حساب الهدف بين 0.35% و 0.75% (الحد الأدنى 0.45% لضمان صافي ربح >= 0.35% بعد الرسوم)
     tp_mult = p.get("tp_atr_mult", 0.6)
-    min_tp = p.get("tp_min_pct", 0.0035)
+    min_tp = p.get("tp_min_pct", 0.0045)
     max_tp = p.get("tp_max_pct", 0.0075)
     tp_pct = float(np.clip(tp_mult * atr_pct, min_tp, max_tp))
     sl_pct = float(p.get("sl_pct", 0.0300))

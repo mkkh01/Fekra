@@ -57,9 +57,9 @@ SIGNAL_MAX_AGE_SEC_FALCON = _ienv("SIGNAL_MAX_AGE_SEC_FALCON", 900) # 15 دقي�
 # أقصى انحراف مسموح به بين السعر اللحظي الحي وسعر إغلاق شمعة الإشارة (0.4%)
 MAX_PRICE_DRIFT_PCT = _fenv("MAX_PRICE_DRIFT_PCT", 0.004)
 
-# ── تأمين الأرباح بنقطة التعادل (Breakeven) ──
-BREAKEVEN_ENABLED = _env("BREAKEVEN_ENABLED", "1") == "1"
-BREAKEVEN_TRIGGER_RATIO = _fenv("BREAKEVEN_TRIGGER_RATIO", 0.5)   # عند قطع 50% من مسافة الهدف
+# ── تأمين الأرباح بنقطة التعادل (Breakeven معطل لنظام SNIPER السريع لمنع الخروج المبكر بالضوضاء) ──
+BREAKEVEN_ENABLED = _env("BREAKEVEN_ENABLED", "0") == "1"
+BREAKEVEN_TRIGGER_RATIO = _fenv("BREAKEVEN_TRIGGER_RATIO", 0.5)
 
 # ── المحركات (تم إلغاء FALCON و DAY واعتماد SNIPER كمحرك رئيسي فائق الدقة WR 91.8%) ──
 ENABLE_SNIPER = _env("ENABLE_SNIPER", "1") == "1"
@@ -79,9 +79,9 @@ DAY_SYMBOLS = SNIPER_SYMBOLS
 FALCON_SYMBOLS = SNIPER_SYMBOLS
 ALL_SYMBOLS = sorted(set(SNIPER_SYMBOLS + [ANCHOR]))
 
-# ── معايير نظام SNIPER الجديد (Win Rate 91.80% | TP في نطاق [0.35% - 0.75%]) ──
+# ── معايير نظام SNIPER الجديد (Win Rate 91.80% | TP صافي في نطاق [0.35% - 0.75%]) ──
 SNIPER = dict(
-    tp_min_pct=_fenv("SNIPER_TP_MIN", 0.0035),    # الحد الأدنى للهدف 0.35%
+    tp_min_pct=_fenv("SNIPER_TP_MIN", 0.0045),    # الحد الأدنى للهدف 0.45% (لضمان صافي ربح >= 0.35% بعد الرسوم)
     tp_max_pct=_fenv("SNIPER_TP_MAX", 0.0075),    # الحد الأقصى للهدف 0.75%
     tp_atr_mult=_fenv("SNIPER_TP_MULT", 0.6),     # مضاعف التقلب الديناميكي للهدف
     sl_pct=_fenv("SNIPER_SL_PCT", 0.0300),        # وقف أمان 3.00%
@@ -90,7 +90,7 @@ SNIPER = dict(
     rsi_oversold=_fenv("SNIPER_RSI_OV", 20.0),    # تشبع بيعي 20
     rsi_overbought=_fenv("SNIPER_RSI_OB", 80.0),  # تشبع شرائي 80
     ema_span=_ienv("SNIPER_EMA_SPAN", 200),       # فلتر اتجاه 200 شمعة
-    max_hold_bars=_ienv("SNIPER_MAX_HOLD", 48),   # أقصى مدة احتفاظ (12 ساعة)
+    max_hold_bars=_ienv("SNIPER_MAX_HOLD", 0),    # 0 = بلا إغلاق زمني عشوائي (انتظار الهدف أو الوقف)
     risk_per_trade=_fenv("SNIPER_RISK", 0.01),    # مخاطرة 1% لكل صفقة
     max_per_day=_ienv("SNIPER_MAX_PER_DAY", 4)     # أقصى عدد صفقات يومية لكل عملة
 )

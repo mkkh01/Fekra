@@ -46,5 +46,7 @@ services:
         value: 0          # معطل بطلب المستخدم
       - key: ENABLE_FALCON
         value: 0          # معطل بطلب المستخدم
+      - key: BREAKEVEN_ENABLED
+        value: 0          # معطل لنظام SNIPER لمنع الخروج المبكر بالضوضاء السعرية
       - key: FUNDING_ENABLED
         value: 1

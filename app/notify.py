@@ -12,6 +12,7 @@ AR_EXIT = {
     "TSL": "الوقف المتحرك 🔒",
     "BE": "نقطة التعادل (حماية) 🛡️",
     "TIME": "انتهاء الوقت ⏱️",
+    "SYSTEM_RETIRED": "تصفية نظام ملغى 🧹",
 }
 
 KEYBOARD = {"inline_keyboard": [
@@ -96,10 +97,10 @@ def t_open(tr):
     if px > 0:
         if tp > 0:
             tp_pct = abs(tp - px) / px * 100
-            tp_str += f" (+{tp_pct:.1f}%)" if tr["side"] == 1 else f" (-{tp_pct:.1f}%)"
+            tp_str += f" (+{tp_pct:.2f}%)"
         if sl > 0:
             sl_pct = abs(px - sl) / px * 100
-            sl_str += f" (-{sl_pct:.1f}%)" if tr["side"] == 1 else f" (+{sl_pct:.1f}%)"
+            sl_str += f" (-{sl_pct:.2f}%)"
 
     return (f"⚡ توصية جديدة — {AR_SYS.get(tr['system'], tr['system'])}{leg}\n"
             f"{sym(tr['symbol'])} {side_ar} | دخول: {fmt_px(px)}\n"
@@ -110,10 +111,21 @@ def t_open(tr):
 
 def t_close(tr):
     win = tr["net"] >= 0
-    side_ar = "شراء" if tr["side"] == 1 else "بيع"
+    side_ar = "شراء 🟢" if tr["side"] == 1 else "بيع 🔴"
     leg = f" (ساق {tr['leg']})" if tr.get("leg") else ""
     reason = tr.get("reason", "")
     reason_label = AR_EXIT.get(reason, reason)
+    sys_name = AR_SYS.get(tr.get("system"), tr.get("system", ""))
+
+    px_in = float(tr.get("entry") or 0)
+    px_out = float(tr.get("exit_price") or 0)
+    side = int(tr.get("side") or 1)
+    if px_in > 0 and px_out > 0:
+        pct = (px_out - px_in) / px_in * 100 if side == 1 else (px_in - px_out) / px_in * 100
+        pct_sign = "+" if pct >= 0 else ""
+        pct_str = f" ({pct_sign}{pct:.2f}%)"
+    else:
+        pct_str = ""
 
     # حساب مدة الاحتفاظ بتنسيق مقروء
     held_str = ""
@@ -137,8 +149,8 @@ def t_close(tr):
         except Exception:
             pass
 
-    return (f"{'✅ فوز' if win else '❌ خسارة'} — {sym(tr['symbol'])} {side_ar}{leg}\n"
-            f"النتيجة: {'+' if win else ''}{tr['net']}$ (R={tr['r']}){held_str}\n"
+    return (f"{'✅ فوز' if win else '❌ خسارة'} — {sys_name} {sym(tr['symbol'])} {side_ar}{leg}\n"
+            f"النتيجة: {'+' if win else ''}{tr['net']}${pct_str}{held_str}\n"
             f"السبب: {reason_label}\n"
             f"دخول {fmt_px(tr['entry'])} → خروج {fmt_px(tr['exit_price'])}")
 
