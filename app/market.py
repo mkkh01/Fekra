@@ -15,43 +15,25 @@ from . import config
 
 
 class VisionMarket:
-    # المصادر الأساسية (Binance العالمية)
+    # المصادر الأساسية الرسمية لبيانات Binance العالمية — بلا قيود جغرافية وبلا حظر
     PRIMARY_BASES = (
         "https://data-api.binance.vision",
-        "https://api1.binance.com",
-        "https://api2.binance.com",
-        "https://api3.binance.com",
-        "https://api.binance.com",
-        "https://www.binance.com",
     )
-    # المصادر الاحتياطية (Binance.US — بنية منفصلة لا تتأثر بحظر IP العالمي لـ 418/429)
-    FALLBACK_BASES = (
-        "https://api.binance.us",
-    )
+    # حُذفت api.binance.us نهائياً لأنها بورصة أمريكية منفصلة بأسعار منحرفة تختلف عن بينانس العالمية
+    FALLBACK_BASES = ()
 
     _cooldown_until = 0
 
     def __init__(self, timeout=None):
         self.sess = requests.Session()
-        self.sess.headers.update({"User-Agent": "CT-FALCON/1.0"})
+        self.sess.headers.update({"User-Agent": "CT-SNIPER/2.0"})
         self.timeout = timeout or config.MARKET_TIMEOUT_SEC
-        self._last_good = None           # قاطع دارة: نتذكّر آخر نقطة ناجحة
+        self._last_good = None
         self._lock = threading.Lock()
 
     def _order(self):
-        import time
-        with self._lock:
-            now = time.time()
-            if now < VisionMarket._cooldown_until:
-                # أثناء فترة حظر أو تهدئة Binance العالمية، نوجّه الطلبات حصراً للاحتياطي
-                # حتى لا نرسل أي طلب يمدد الحظر التلقائي في Binance.com
-                return self.FALLBACK_BASES
-
-            bases = self.PRIMARY_BASES + self.FALLBACK_BASES
-            if self._last_good and self._last_good in bases:
-                lg = self._last_good
-                return (lg,) + tuple(b for b in bases if b != lg)
-            return bases
+        # نعتمد حصراً على data-api.binance.vision لضمان مطابقة الأسعار الحية مع بينانس العالمية بدقة تامة
+        return self.PRIMARY_BASES
 
     def _get(self, path, **kwargs):
         import time, re

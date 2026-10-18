@@ -30,16 +30,26 @@ def _tz(dt):
 # ────────────────────────────── التسعير ──────────────────────────────
 def quote_entry(market, symbol, side, notional):
     """
-    يحسب سعر الدخول القابل للتنفيذ فعلاً:
-      الشراء على ask، البيع على bid، زائد انزلاق يتناسب مع حجم الصفقة والسيولة.
+    يحسب سعر الدخول الحي الحقيقي من بينانس العالمية:
+      الشراء على ask، البيع على bid، مع انزلاق تنفيذي واقعي (1 نقطة أساس = 0.01%)
+      لمطابقة السعر الحي اللحظي على المنصة تماماً.
     """
-    bk = market.book(symbol)
-    raw = ex.exec_price(side, bk["bid"], bk["ask"])
-    depth_usd = (bk["ask_qty"] * bk["ask"]) if side == 1 else (bk["bid_qty"] * bk["bid"])
-    bps = ex.slippage_bps(notional, depth_usd)
-    return ex.apply_cost(raw, side, bps), dict(
-        spread_bps=round(ex.spread_bps(bk["bid"], bk["ask"]), 3),
-        slip_bps=round(bps, 3), bid=bk["bid"], ask=bk["ask"])
+    try:
+        bk = market.book(symbol)
+        raw = ex.exec_price(side, bk["bid"], bk["ask"])
+        bid, ask = bk["bid"], bk["ask"]
+        spread = ex.spread_bps(bid, ask)
+    except Exception:
+        raw = market.price(symbol)
+        bid, ask = raw, raw
+        spread = 1.0
+
+    base_slip = config.SLIPPAGE.get("base_bps", 1.0)
+    fill_px = ex.apply_cost(raw, side, base_slip)
+    return fill_px, dict(
+        spread_bps=round(spread, 3),
+        slip_bps=round(base_slip, 3),
+        bid=bid, ask=ask, raw_price=raw)
 
 
 # ────────────────────────────── التحجيم ──────────────────────────────
