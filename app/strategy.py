@@ -195,15 +195,17 @@ def sniper_scan_debug(df, p):
         dbg["reject"] = "nan"
         return 0, None, None, None, dbg
 
-    cr = h[i] - l[i] + 1e-10
-    lower_wick = (min(o[i], c[i]) - l[i]) / cr
-    upper_wick = (h[i] - max(o[i], c[i])) / cr
+    # Volume filter
+    v = df["volume"].to_numpy()
+    vol_sma = pd.Series(v).rolling(20).mean().to_numpy()
+    vol_mult = p.get("vol_mult", 1.15)
+    vol_ok = bool(v[i] >= vol_mult * vol_sma[i])
 
-    rev_l = (lower_wick >= 0.20 or c[i] > o[i])
-    rev_s = (upper_wick >= 0.20 or c[i] < o[i])
+    bull_rev = bool(c[i] > o[i])
+    bear_rev = bool(c[i] < o[i])
 
-    rsi_ov = p.get("rsi_oversold", 20.0)
-    rsi_ob = p.get("rsi_overbought", 80.0)
+    rsi_ov = p.get("rsi_oversold", 18.0)
+    rsi_ob = p.get("rsi_overbought", 82.0)
 
     dbg["trig"] = dict(
         long_pierce=bool(l[i] < lower_bb[i]),
@@ -211,25 +213,23 @@ def sniper_scan_debug(df, p):
         long_trend=bool(c[i] >= ema200[i] * 0.99),
         short_pierce=bool(h[i] > upper_bb[i]),
         short_rsi=bool(r7[i] > rsi_ob),
-        short_trend=bool(c[i] <= ema200[i] * 1.01)
+        short_trend=bool(c[i] <= ema200[i] * 1.01),
+        vol_ok=vol_ok
     )
 
-    # حساب الهدف بين 0.35% و 0.75% (الحد الأدنى 0.45% لضمان صافي ربح >= 0.35% بعد الرسوم)
-    tp_mult = p.get("tp_atr_mult", 0.6)
-    min_tp = p.get("tp_min_pct", 0.0045)
-    max_tp = p.get("tp_max_pct", 0.0075)
-    tp_pct = float(np.clip(tp_mult * atr_pct, min_tp, max_tp))
-    sl_pct = float(p.get("sl_pct", 0.0300))
+    # الهدف الثابت 0.75% ووقف الأمان 5.00%
+    tp_pct = float(p.get("tp_pct", 0.0075))
+    sl_pct = float(p.get("sl_pct", 0.0500))
 
     # Long Signal
-    if l[i] < lower_bb[i] and r7[i] < rsi_ov and c[i] >= ema200[i] * 0.99 and rev_l:
+    if l[i] < lower_bb[i] and r7[i] < rsi_ov and c[i] >= ema200[i] * 0.99 and bull_rev and vol_ok:
         px = float(c[i])
         tp = px * (1.0 + tp_pct)
         sl = px * (1.0 - sl_pct)
         return 1, px, tp, sl, dbg
 
     # Short Signal
-    if h[i] > upper_bb[i] and r7[i] > rsi_ob and c[i] <= ema200[i] * 1.01 and rev_s:
+    if h[i] > upper_bb[i] and r7[i] > rsi_ob and c[i] <= ema200[i] * 1.01 and bear_rev and vol_ok:
         px = float(c[i])
         tp = px * (1.0 - tp_pct)
         sl = px * (1.0 + sl_pct)

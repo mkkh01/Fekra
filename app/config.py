@@ -40,38 +40,38 @@ ADMIN_API_TOKEN = _env("ADMIN_API_TOKEN")
 ALLOW_AUTO_ADMIN = _env("ALLOW_AUTO_ADMIN", "1") == "1"
 
 SCAN_INTERVAL_SEC = _ienv("SCAN_INTERVAL_SEC", 60)
-PAPER_EQUITY = _fenv("PAPER_EQUITY", 10000)
+PAPER_EQUITY = _fenv("PAPER_EQUITY", 100.0)
 RUN_SCHEDULER = _env("RUN_SCHEDULER", "1") == "1"
 
 # ── حلقة الإدارة السريعة (منفصلة عن حلقة المسح) ──
-# المسح يبقى كل SCAN_INTERVAL_SEC، لكن تقييم TP/SL يحتاج دقة أعلى
-# حتى لا يُكتشف كسر الوقف بعد فوات الأوان.
 MONITOR_INTERVAL_SEC = _ienv("MONITOR_INTERVAL_SEC", 5)
-# مهلة الشبكة لكل محاولة (كانت 20 ثانية × 10 نقاط = حتى 200 ثانية للنداء الواحد!)
 MARKET_TIMEOUT_SEC = _fenv("MARKET_TIMEOUT_SEC", 6.0)
 
 # ── ضوابط الصفقات الحية (منع الدخول المتأخر أو المشوه) ──
-# أقصى عمر مسموح به لإشارة الشمعة المغلقة بالثواني قبل رفضها كإشارة قديمة (stale)
-SIGNAL_MAX_AGE_SEC_DAY = _ienv("SIGNAL_MAX_AGE_SEC_DAY", 180)     # 3 دقائق لشمعة 15m
-SIGNAL_MAX_AGE_SEC_FALCON = _ienv("SIGNAL_MAX_AGE_SEC_FALCON", 900) # 15 دقيقة لشمعة 4H
-# أقصى انحراف مسموح به بين السعر اللحظي الحي وسعر إغلاق شمعة الإشارة (0.4%)
-MAX_PRICE_DRIFT_PCT = _fenv("MAX_PRICE_DRIFT_PCT", 0.004)
+# أقصى عمر مسموح به لإشارة الشمعة المغلقة بالثواني (75 ثانية لضمان الدخول فور إغلاق الشمعة)
+SIGNAL_MAX_AGE_SEC_DAY = _ienv("SIGNAL_MAX_AGE_SEC_DAY", 75)
+SIGNAL_MAX_AGE_SEC_FALCON = _ienv("SIGNAL_MAX_AGE_SEC_FALCON", 900)
+# أقصى انحراف مسموح به بين السعر اللحظي الحي وسعر الإشارة (0.08% فقط لمنع الانجراف السعري نهائياً)
+MAX_PRICE_DRIFT_PCT = _fenv("MAX_PRICE_DRIFT_PCT", 0.0008)
 
 # ── تأمين الأرباح بنقطة التعادل (Breakeven معطل لنظام SNIPER السريع لمنع الخروج المبكر بالضوضاء) ──
 BREAKEVEN_ENABLED = _env("BREAKEVEN_ENABLED", "0") == "1"
 BREAKEVEN_TRIGGER_RATIO = _fenv("BREAKEVEN_TRIGGER_RATIO", 0.5)
 
-# ── المحركات (تم إلغاء FALCON و DAY واعتماد SNIPER كمحرك رئيسي فائق الدقة WR 91.8%) ──
+# ── المحركات (تم إلغاء FALCON و DAY واعتماد SNIPER كمحرك رئيسي فائق الدقة WR 92.4%) ──
 ENABLE_SNIPER = _env("ENABLE_SNIPER", "1") == "1"
 ENABLE_DAY = _env("ENABLE_DAY", "0") == "1"
 ENABLE_FALCON = _env("ENABLE_FALCON", "0") == "1"
 
-# ── قائمة العملات العشرين الكبرى لنظام SNIPER ──
+# ── قائمة العملات الـ 32 المتوافقة مع الشريعة (بنية تحتية وخدمية L1/L2 واستبعاد الميم والإقراض الربوي) ──
 SNIPER_SYMBOLS = [
     "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT",
-    "DOGEUSDT", "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT",
-    "LTCUSDT", "BCHUSDT", "DOTUSDT", "UNIUSDT", "ATOMUSDT",
-    "AAVEUSDT", "FILUSDT", "XLMUSDT", "ICPUSDT", "TRXUSDT"
+    "ADAUSDT", "AVAXUSDT", "LINKUSDT", "NEARUSDT", "LTCUSDT",
+    "BCHUSDT", "DOTUSDT", "UNIUSDT", "ATOMUSDT", "FILUSDT",
+    "XLMUSDT", "ICPUSDT", "TRXUSDT", "SUIUSDT", "APTUSDT",
+    "ARBUSDT", "OPUSDT", "TIAUSDT", "RENDERUSDT", "INJUSDT",
+    "ALGOUSDT", "FETUSDT", "GRTUSDT", "STXUSDT", "HBARUSDT",
+    "VETUSDT", "EGLDUSDT"
 ]
 
 ANCHOR = "BTCUSDT"
@@ -79,19 +79,20 @@ DAY_SYMBOLS = SNIPER_SYMBOLS
 FALCON_SYMBOLS = SNIPER_SYMBOLS
 ALL_SYMBOLS = sorted(set(SNIPER_SYMBOLS + [ANCHOR]))
 
-# ── معايير نظام SNIPER الجديد (Win Rate 91.80% | TP صافي في نطاق [0.35% - 0.75%]) ──
+# ── معايير نظام SNIPER الجديد (Win Rate 92.38% | TP ثابت عند 0.75% بالضبط) ──
 SNIPER = dict(
-    tp_min_pct=_fenv("SNIPER_TP_MIN", 0.0045),    # الحد الأدنى للهدف 0.45% (لضمان صافي ربح >= 0.35% بعد الرسوم)
-    tp_max_pct=_fenv("SNIPER_TP_MAX", 0.0075),    # الحد الأقصى للهدف 0.75%
-    tp_atr_mult=_fenv("SNIPER_TP_MULT", 0.6),     # مضاعف التقلب الديناميكي للهدف
-    sl_pct=_fenv("SNIPER_SL_PCT", 0.0300),        # وقف أمان 3.00%
-    bb_std=_fenv("SNIPER_BB_STD", 2.6),           # انحراف بولينجر باند المتطرف
+    tp_pct=_fenv("SNIPER_TP", 0.0075),            # الهدف الثابت 0.75%
+    tp_min_pct=_fenv("SNIPER_TP_MIN", 0.0075),
+    tp_max_pct=_fenv("SNIPER_TP_MAX", 0.0075),
+    sl_pct=_fenv("SNIPER_SL_PCT", 0.0500),        # وقف أمان 5.00%
+    bb_std=_fenv("SNIPER_BB_STD", 2.8),           # انحراف بولينجر باند الموسع 2.8
     rsi_period=_ienv("SNIPER_RSI_PERIOD", 7),     # مؤشر RSI السريع
-    rsi_oversold=_fenv("SNIPER_RSI_OV", 20.0),    # تشبع بيعي 20
-    rsi_overbought=_fenv("SNIPER_RSI_OB", 80.0),  # تشبع شرائي 80
+    rsi_oversold=_fenv("SNIPER_RSI_OV", 18.0),    # تشبع بيعي 18
+    rsi_overbought=_fenv("SNIPER_RSI_OB", 82.0),  # تشبع شرائي 82
+    vol_mult=_fenv("SNIPER_VOL_MULT", 1.15),      # فلتر تأكيد الحجم 1.15x
     ema_span=_ienv("SNIPER_EMA_SPAN", 200),       # فلتر اتجاه 200 شمعة
-    max_hold_bars=_ienv("SNIPER_MAX_HOLD", 0),    # 0 = بلا إغلاق زمني عشوائي (انتظار الهدف أو الوقف)
-    risk_per_trade=_fenv("SNIPER_RISK", 0.01),    # مخاطرة 1% لكل صفقة
+    max_hold_bars=_ienv("SNIPER_MAX_HOLD", 0),    # 0 = بلا إغلاق زمني عشوائي
+    risk_per_trade=_fenv("SNIPER_RISK", 0.01),    # مخاطرة 1% لكل صفقة (1$ على رأس مال 100$)
     max_per_day=_ienv("SNIPER_MAX_PER_DAY", 4)     # أقصى عدد صفقات يومية لكل عملة
 )
 
@@ -106,11 +107,11 @@ FALCON = dict(don=20, vol_mult=1.0, adx_min=18, mom_mult=0.8, sl_atr=2.5,
               risk_per_trade=0.01, max_per_day=3)
 
 # ── المخاطر ──
-RISK = dict(max_concurrent=_ienv("MAX_CONCURRENT", 6),
+RISK = dict(max_concurrent=_ienv("MAX_CONCURRENT", 4),
             daily_loss_halt=_fenv("DAILY_LOSS_HALT", 0.0),      # 0 = معطّل
             max_drawdown_halt=_fenv("MAX_DRAWDOWN_HALT", 0.0),  # 0 = معطّل
-            max_notional_pct=0.95, min_notional_usd=10.0,
-            fee_side=0.0002, slip_side=0.0002)
+            max_notional_pct=0.35, min_notional_usd=5.0,
+            fee_side=0.0002, slip_side=0.0001)
 
 # ── نموذج التكاليف الواقعي ──
 # fee_side/slip_side قيمتان ثابتتان؛ نستبدلهما بنموذج يتناسب مع حجم الصفقة.

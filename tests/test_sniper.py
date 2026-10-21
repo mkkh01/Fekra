@@ -30,13 +30,13 @@ def test_sniper_engine_configuration():
     assert config.ENABLE_SNIPER is True
     assert config.ENABLE_DAY is False
     assert config.ENABLE_FALCON is False
-    assert len(config.SNIPER_SYMBOLS) == 20
+    assert len(config.SNIPER_SYMBOLS) == 32
     assert "BTCUSDT" in config.SNIPER_SYMBOLS
     assert "ETHUSDT" in config.SNIPER_SYMBOLS
     assert "SOLUSDT" in config.SNIPER_SYMBOLS
-    assert config.SNIPER["tp_min_pct"] == 0.0045
-    assert config.SNIPER["tp_max_pct"] == 0.0075
-    assert config.SNIPER["sl_pct"] == 0.030
+    assert config.SNIPER["tp_pct"] == 0.0075
+    assert config.SNIPER["sl_pct"] == 0.050
+    assert config.PAPER_EQUITY == 100.0
 
 
 def test_sniper_scan_debug_insufficient_bars():
@@ -78,9 +78,9 @@ def test_sniper_scan_debug_tp_sl_rules():
     if sig != 0:
         if sig == 1:
             tp_pct = (tp - entry) / entry
-            assert 0.0035 <= tp_pct <= 0.0075
+            assert round(tp_pct, 4) == 0.0075
             assert sl < entry
         elif sig == -1:
             tp_pct = (entry - tp) / entry
-            assert 0.0035 <= tp_pct <= 0.0075
+            assert round(tp_pct, 4) == 0.0075
             assert sl > entry

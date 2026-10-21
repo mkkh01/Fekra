@@ -62,6 +62,8 @@ def position_size(equity, risk_pct, sl_dist, price,
     qty = (equity * risk_pct) / sl_dist
     qty = min(qty, (equity * max_notional_pct) / price)
     if qty * price < min_notional:
+        if equity <= 200.0 and min_notional <= equity * 0.40:
+            return min_notional / price
         return 0.0
     return qty
 

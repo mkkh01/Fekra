@@ -268,10 +268,8 @@ def _scan_sniper(md, today, equity, summ, send, open_pos, counts):
                 rej["risk-size-live"] += 1
                 continue
 
-            tp_pct = abs(tp_sig / px_sig - 1.0)
-            sl_pct = abs(sl_sig / px_sig - 1.0)
-            # ضمان أن هدف الربح لا يقل عن 0.45% ليكون صافي الربح بعد الرسوم >= 0.35%
-            tp_pct = max(0.0045, min(0.0075, tp_pct))
+            tp_pct = float(p.get("tp_pct", 0.0075))
+            sl_pct = float(p.get("sl_pct", 0.0500))
             live_tp = px * (1.0 + tp_pct) if side == 1 else px * (1.0 - tp_pct)
             live_sl = px * (1.0 - sl_pct) if side == 1 else px * (1.0 + sl_pct)
 

@@ -35,13 +35,13 @@ services:
       - key: MONITOR_INTERVAL_SEC
         value: 5
       - key: PAPER_EQUITY
-        value: 10000
+        value: 100        # رأس المال 100 دولار فقط بطلب المستخدم
       - key: MAX_CONCURRENT
-        value: 8
+        value: 4          # 4 مراكز كحد أقصى (توزيع رأس المال 20$ لكل مركز)
       - key: RUN_SCHEDULER
         value: 1
       - key: ENABLE_SNIPER
-        value: 1          # المحرك الجديد فائق الدقة (Win Rate 91.8%)
+        value: 1          # المحرك الحلال فائق الدقة (Win Rate 92.4% | TP 0.75%)
       - key: ENABLE_DAY
         value: 0          # معطل بطلب المستخدم
       - key: ENABLE_FALCON

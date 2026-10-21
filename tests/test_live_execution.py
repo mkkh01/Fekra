@@ -35,8 +35,8 @@ def test_breakeven_advances_stop():
 def test_price_drift_guard():
     """إذا تحرك السعر الحي بعيداً عن سعر إشارة الشمعة بأكثر من الحد المسموح، يتم الرفض."""
     px_sig = 100.0
-    live_ok = 100.3      # انحراف 0.3% <= 0.4%
-    live_drifted = 100.6 # انحراف 0.6% > 0.4%
+    live_ok = 100.05      # انحراف 0.05% <= 0.08%
+    live_drifted = 100.15 # انحراف 0.15% > 0.08%
     
     drift_ok = abs(live_ok - px_sig) / px_sig
     drift_bad = abs(live_drifted - px_sig) / px_sig
