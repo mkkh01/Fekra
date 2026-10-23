@@ -221,8 +221,24 @@ def _scan_sniper(md, today, equity, summ, send, open_pos, counts):
     p = config.SNIPER
     rej = Counter()
     symbols = getattr(config, "SNIPER_SYMBOLS", config.ALL_SYMBOLS)
+
+    # فحص دورة 15m: الشموع المكتملة تتغير فقط كل 15 دقيقة (:00, :15, :30, :45)
+    # لا داعي لمسح 32 شمعة كل 60 ثانية إذا لم تغلق شمعة جديدة حديثاً!
+    now = datetime.now(timezone.utc)
+    minute = now.minute
+    candle_window = (minute % 15) <= 2
+    last_scanned_candle = cache.get("ct:sniper:last_candle")
+    current_candle_id = now.replace(minute=(minute // 15) * 15, second=0, microsecond=0).isoformat()
+
+    if not candle_window and last_scanned_candle == current_candle_id:
+        summ["reject_sniper"] = {"waiting-new-15m-candle": len(symbols)}
+        return open_pos
+
+    cache.set("ct:sniper:last_candle", current_candle_id, ex=1800)
+
     for sym_ in symbols:
         summ["scanned_sniper"] = summ.get("scanned_sniper", 0) + 1
+        time.sleep(0.08)  # مهلة 80ms بين العملات لمنع ضغط الطلبات المفاجئ وحظر 418
         try:
             df = _bars(md, sym_, "15m", 250)
             side, px_sig, tp_sig, sl_sig, dbg = st.sniper_scan_debug(df, p)

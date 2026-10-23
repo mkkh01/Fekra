@@ -37,23 +37,28 @@ class VisionMarket:
 
     def _get(self, path, **kwargs):
         import time, re
+        now = time.time()
+        # إذا كان هناك حظر نشط، نمتنع تماماً عن إرسال أي طلب شبكة لنسمح لبينانس برفع الحظر تلقائياً
+        if now < VisionMarket._cooldown_until:
+            rem = int(VisionMarket._cooldown_until - now)
+            raise requests.HTTPError(f"418 Cooldown Active ({rem}s remaining) — ننتظر انتهاء فترة التهدئة لرفع حظر بينانس تلقائياً")
+
         last = None
         for base in self._order():
             try:
                 r = self.sess.get(f"{base}{path}", **kwargs)
                 if r.status_code in (418, 429):
-                    # حظر IP مؤقت (418/429): استخراج موعد انتهاء الحظر بدقة
+                    # حظر IP مؤقت (418/429): استخراج موعد انتهاء الحظر بدقة والتوقف الفوري
                     text = r.text or ""
                     m = re.search(r"banned until (\d+)", text)
                     if m:
                         ban_ts = int(m.group(1)) / 1000.0
-                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, ban_ts + 10.0)
+                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, ban_ts + 5.0)
                     else:
-                        retry_after = int(r.headers.get("Retry-After", "300"))
-                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, time.time() + max(180, retry_after))
-                    last = requests.HTTPError(f"{r.status_code} from {base}")
-                    # استمر فوراً للمصدر الاحتياطي دون إيقاف الدورة!
-                    continue
+                        retry_after = int(r.headers.get("Retry-After", "120"))
+                        VisionMarket._cooldown_until = max(VisionMarket._cooldown_until, time.time() + retry_after)
+                    rem = int(max(1, VisionMarket._cooldown_until - time.time()))
+                    raise requests.HTTPError(f"418 IP Rate Limit from {base} (banned for {rem}s)")
                 if r.status_code != 200:
                     last = requests.HTTPError(f"{r.status_code} from {base}")
                     continue
