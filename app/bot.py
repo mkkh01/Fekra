@@ -133,8 +133,9 @@ def _live_health():
     """فحوصات حقيقية لحظة الضغط، لا تعتمد على لقطة محفوظة."""
     health = {}
     try:
-        VisionMarket().price("BTCUSDT")
-        health["Binance"] = "ok"
+        md = VisionMarket()
+        md.price("BTCUSDT")
+        health["Binance"] = md.provider_status()
     except Exception as e:
         health["Binance"] = f"ERR {str(e)[:80]}"
     try:
@@ -157,14 +158,14 @@ def _live_health():
 
 def _health_line(health):
     def mark(value):
-        return "✅" if value == "ok" else ("⏭️" if value == "no-token" else "❌")
+        return "✅" if str(value).startswith("ok") else ("⏭️" if value == "no-token" else "❌")
     return " ".join(f"{key}{mark(value)}" for key, value in health.items())
 
 
 def _current_errors(c, health, stale=False):
     """الأخطاء الحالية فقط: فحص الآن + آخر دورة + توقف الجدولة الآن."""
     errors = [f"{key}: {value}" for key, value in health.items()
-              if value not in ("ok", "no-token")]
+              if not str(value).startswith("ok") and value != "no-token"]
     if c:
         raw = c.get("errors") or []
         if isinstance(raw, str):
@@ -173,7 +174,14 @@ def _current_errors(c, health, stale=False):
                 raw = json.loads(raw)
             except Exception:
                 raw = [raw]
-        errors.extend(str(error) for error in raw if error)
+        market_ok = str(health.get("Binance", "")).startswith("ok")
+        for error in raw:
+            if not error:
+                continue
+            err_str = str(error)
+            if market_ok and ("Cooldown Active" in err_str or "banned for" in err_str):
+                continue
+            errors.append(err_str)
     if stale:
         errors.append("scheduler: لا توجد دورة حديثة ضمن المهلة")
     return errors
@@ -194,7 +202,7 @@ def render_perf():
     if c:
         stale = (now - c["ended_at"]).total_seconds() > config.SCAN_INTERVAL_SEC * 2.5
     errors = _current_errors(c, health, stale)
-    system_ok = config.RUN_SCHEDULER and not any(value not in ("ok", "no-token") for value in health.values()) and not stale
+    system_ok = config.RUN_SCHEDULER and not any(not str(value).startswith("ok") and value != "no-token" for value in health.values()) and not stale
     status = "يعمل ✅" if system_ok else "يحتاج مراجعة ⚠️"
     halted = db.get_state("halted", "")
     signals_today = c["signals"] if c and c["ended_at"].strftime("%Y-%m-%d") == today else 0
@@ -331,7 +339,7 @@ def render_cycle():
         lines.extend(["🟠 في انتظار أول دورة", f"🕐 آخر تحديث: {now.strftime('%H:%M:%S')} UTC"])
 
     lines.extend(["", "━━━━━━━━━━━━━━", "💓 حالة المحركات",
-                  f"Binance {'✅' if health['Binance'] == 'ok' else '❌'}   Supabase {'✅' if health['Supabase'] == 'ok' else '❌'}",
+                  f"Binance {'✅' if str(health['Binance']).startswith('ok') else '❌'}   Supabase {'✅' if health['Supabase'] == 'ok' else '❌'}",
                   f"Redis {'✅' if health['Redis'] == 'ok' else '❌'}     Telegram {'✅' if health['Telegram'] == 'ok' else '❌'}",
                   "", "🧾 الأخطاء الحالية"])
     current_errors = _current_errors(c, health, stale)

@@ -49,7 +49,7 @@ def run_cycle(note=""):
         # ── 1) نبض المحركات ──
         try:
             md.price("BTCUSDT")
-            summ["health"]["binance"] = "ok"
+            summ["health"]["binance"] = md.provider_status()
         except Exception as e:
             summ["health"]["binance"] = f"ERR {e}"[:120]
             summ["errors"].append(f"binance: {e}"[:150])

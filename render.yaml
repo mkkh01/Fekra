@@ -5,6 +5,7 @@ services:
   - type: web
     name: ct-falcon
     runtime: python
+    region: frankfurt
     plan: starter            # المجانية تنام وتوقف الدورات — Starter إجباري لـ 24/7
     buildCommand: pip install -r requirements.txt
     startCommand: gunicorn --config gunicorn.conf.py app.main:app
