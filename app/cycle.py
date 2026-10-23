@@ -238,7 +238,7 @@ def _scan_sniper(md, today, equity, summ, send, open_pos, counts):
 
     for sym_ in symbols:
         summ["scanned_sniper"] = summ.get("scanned_sniper", 0) + 1
-        time.sleep(0.08)  # مهلة 80ms بين العملات لمنع ضغط الطلبات المفاجئ وحظر 418
+        time.sleep(0.12)  # مهلة 120ms بين العملات لمنع ضغط الطلبات المفاجئ وحظر Cloudflare 418
         try:
             df = _bars(md, sym_, "15m", 250)
             side, px_sig, tp_sig, sl_sig, dbg = st.sniper_scan_debug(df, p)

@@ -51,3 +51,9 @@ services:
         value: 0          # معطل لنظام SNIPER لمنع الخروج المبكر بالضوضاء السعرية
       - key: FUNDING_ENABLED
         value: 1
+      - key: BINANCE_API_KEY     # اختياري للتداول الورقي (يمنح حصانة API) وإجباري للـ Live
+        sync: false
+      - key: BINANCE_API_SECRET  # اختياري للتداول الورقي وإجباري للـ Live
+        sync: false
+      - key: LIVE_TRADING
+        value: 0          # 0 للورقي و 1 للتداول الحقيقي بأموال حقيقية

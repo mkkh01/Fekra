@@ -39,6 +39,11 @@ ADMIN_API_TOKEN = _env("ADMIN_API_TOKEN")
 # هل يُسمح بتسجيل أول من يرسل /start كمدير؟ (افتراضياً نعم لتسهيل التثبيت)
 ALLOW_AUTO_ADMIN = _env("ALLOW_AUTO_ADMIN", "1") == "1"
 
+# ── مفاتيح بينانس الرسمية (اختيارية للـ Paper وتفعيل حصانة الـ API — إجبارية للتداول الحي Live) ──
+BINANCE_API_KEY = _env("BINANCE_API_KEY", "")
+BINANCE_API_SECRET = _env("BINANCE_API_SECRET", "")
+LIVE_TRADING = _env("LIVE_TRADING", "0") in ("1", "true", "True")
+
 SCAN_INTERVAL_SEC = _ienv("SCAN_INTERVAL_SEC", 60)
 PAPER_EQUITY = _fenv("PAPER_EQUITY", 100.0)
 RUN_SCHEDULER = _env("RUN_SCHEDULER", "1") == "1"
